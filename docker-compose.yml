@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  mirrorclone:
+    build: .
+    container_name: mirrorclone
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./mirrorclone/config:/config
+      - ./mirrorclone/backups:/backups
+      - D:/test:/data:ro
+    environment:
+      - TZ=Asia/Jerusalem
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+    privileged: true
+    networks:
+      - backup-network
+
+networks:
+  backup-network:
+    driver: bridge

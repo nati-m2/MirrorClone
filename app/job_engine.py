@@ -1,0 +1,308 @@
+import subprocess
+import asyncio
+import shutil
+import tempfile
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Callable
+from app.models import Job, JobStatus, JobLog
+from app.config import settings
+
+
+class JobEngine:
+    """Executes backup jobs using Rclone"""
+    
+    def __init__(self, on_log: Optional[Callable] = None):
+        self.config_path = settings.rclone_config
+        self.on_log = on_log
+        self.running_jobs: dict[str, subprocess.Popen] = {}
+    
+    async def execute_job(self, job: Job) -> tuple[bool, str, int]:
+        """Execute a backup job"""
+        if job.id in self.running_jobs:
+            return False, "Job is already running", -1
+        
+        self._log(job.id, "started", f"Starting backup: {job.name}")
+        
+        try:
+            # Handle multiple source paths (comma-separated)
+            source_paths = [p.strip() for p in job.source_path.split(',') if p.strip()]
+            
+            # Create ZIP if needed
+            if job.compress_before_upload:
+                self._log(job.id, "progress", "Creating ZIP archive...")
+                # Run ZIP creation in thread pool to not block
+                loop = asyncio.get_event_loop()
+                zip_path = await loop.run_in_executor(
+                    None,
+                    lambda: self._create_zip_multi(source_paths, job.name, job.zip_password)
+                )
+                if zip_path:
+                    self._log(job.id, "progress", f"ZIP created: {zip_path}")
+                    return await self._upload_file(job, zip_path)
+                else:
+                    self._log(job.id, "failed", "Failed to create ZIP archive", -1)
+                    return False, "Failed to create ZIP archive", -1
+            
+            # No ZIP - upload each path preserving structure
+            return await self._upload_paths(job, source_paths)
+            
+        except Exception as e:
+            error_msg = f"Exception during backup: {str(e)}"
+            self._log(job.id, "failed", error_msg, -1, str(e))
+            return False, error_msg, -1
+    
+    async def _upload_file(self, job: Job, file_path: str) -> tuple[bool, str, int]:
+        """Upload a single file to destination with date and time in folder name"""
+        # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
+        date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
+        clean_name = "".join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name)
+        dated_folder = f"{clean_name}-{date_str}"
+        dest = f"{job.destination.rstrip('/')}/{dated_folder}"
+        
+        cmd = [
+            "rclone", "copy",
+            file_path,
+            dest,
+            "--config", str(self.config_path),
+            "--transfers", "4",
+        ]
+        
+        self._log(job.id, "progress", f"Uploading to: {dest}")
+        
+        # Run in thread pool to not block event loop
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        )
+        
+        if result.returncode == 0:
+            # Cleanup old backups if retention is set
+            if job.retention_count > 0:
+                await self._cleanup_old_backups_async(job, clean_name)
+            self._log(job.id, "success", f"Backup completed: {dest}", 0, result.stdout)
+            return True, f"Backup completed: {dest}", 0
+        else:
+            self._log(job.id, "failed", f"Upload failed: {result.stderr}", result.returncode)
+            return False, result.stderr, result.returncode
+    
+    async def _upload_paths(self, job: Job, source_paths: list[str]) -> tuple[bool, str, int]:
+        """Upload multiple paths preserving directory structure with date and time in folder name"""
+        # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
+        date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
+        clean_name = "".join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name)
+        dated_folder = f"{clean_name}-{date_str}"
+        base_dest = f"{job.destination.rstrip('/')}/{dated_folder}"
+        
+        self._log(job.id, "progress", f"Uploading {len(source_paths)} item(s) to {base_dest}")
+        
+        # Create a files-from list for rclone
+        files_list = []
+        for source_path in source_paths:
+            if source_path.startswith('/data/'):
+                files_list.append(source_path[6:])  # Remove /data/ prefix
+            else:
+                files_list.append(source_path)
+        
+        # Write files list to temp file
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write('\n'.join(files_list))
+            files_from_path = f.name
+        
+        try:
+            cmd = [
+                "rclone", "copy",
+                "/data",
+                base_dest,
+                "--config", str(self.config_path),
+                "--files-from", files_from_path,
+                "--transfers", "4",
+                "--checkers", "8",
+            ]
+            
+            # Run in thread pool to not block event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, 
+                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            )
+        finally:
+            # Clean up temp file
+            Path(files_from_path).unlink(missing_ok=True)
+        
+        if result.returncode == 0:
+            # Cleanup old backups if retention is set
+            if job.retention_count > 0:
+                await self._cleanup_old_backups_async(job, clean_name)
+            self._log(job.id, "success", f"Backup completed: {base_dest}", 0)
+            return True, f"Backup completed: {base_dest}", 0
+        else:
+            self._log(job.id, "failed", f"Upload failed: {result.stderr}", result.returncode)
+            return False, result.stderr, result.returncode
+    
+    def _cleanup_old_backups(self, job: Job, job_name_prefix: str):
+        """Keep only the latest N backups"""
+        try:
+            self._log(job.id, "progress", f"Keeping only {job.retention_count} latest backup(s)...")
+            
+            # List all folders in destination
+            result = subprocess.run(
+                [
+                    "rclone", "lsf",
+                    job.destination.rstrip('/'),
+                    "--config", str(self.config_path),
+                    "--dirs-only"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode != 0:
+                return
+            
+            folders = [f.strip().rstrip('/') for f in result.stdout.strip().split('\n') if f.strip()]
+            
+            # Filter folders matching this job's pattern: JobName-DD.MM.YYYY-HH:MM:SS
+            job_folders = []
+            for folder in folders:
+                # Match pattern with time: JobName-DD.MM.YYYY-HH:MM:SS
+                match = re.match(rf"^{re.escape(job_name_prefix)}-(\d{{2}})\.(\d{{2}})\.(\d{{4}})-(\d{{2}}):(\d{{2}}):(\d{{2}})$", folder)
+                if match:
+                    day, month, year, hour, minute, second = match.groups()
+                    try:
+                        folder_date = datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+                        job_folders.append((folder, folder_date))
+                    except ValueError:
+                        continue
+                else:
+                    # Also match old patterns
+                    match_old = re.match(rf"^{re.escape(job_name_prefix)}-(\d{{2}})\.(\d{{2}})\.(\d{{4}})", folder)
+                    if match_old:
+                        day, month, year = match_old.groups()
+                        try:
+                            folder_date = datetime(int(year), int(month), int(day))
+                            job_folders.append((folder, folder_date))
+                        except ValueError:
+                            continue
+            
+            # Sort by date (newest first)
+            job_folders.sort(key=lambda x: x[1], reverse=True)
+            
+            # Delete folders beyond retention count
+            folders_to_delete = job_folders[job.retention_count:]
+            deleted_count = 0
+            
+            for folder, _ in folders_to_delete:
+                delete_result = subprocess.run(
+                    [
+                        "rclone", "purge",
+                        f"{job.destination.rstrip('/')}/{folder}",
+                        "--config", str(self.config_path)
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                if delete_result.returncode == 0:
+                    deleted_count += 1
+            
+            if deleted_count > 0:
+                self._log(job.id, "progress", f"Deleted {deleted_count} old backup(s)")
+                
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+    
+    async def _cleanup_old_backups_async(self, job: Job, job_name_prefix: str):
+        """Async version - Keep only the latest N backups"""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: self._cleanup_old_backups(job, job_name_prefix))
+    
+    def _create_zip_multi(self, source_paths: list[str], job_name: str, password: Optional[str] = None) -> Optional[str]:
+        """Create ZIP archive from multiple source paths preserving structure"""
+        try:
+            backups_dir = Path("/backups")
+            backups_dir.mkdir(parents=True, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Clean job name for filename
+            clean_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in job_name)
+            zip_name = f"{clean_name}_{timestamp}"
+            zip_path = backups_dir / f"{zip_name}.zip"
+            
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                
+                for source_path_str in source_paths:
+                    source = Path(source_path_str)
+                    if not source.exists():
+                        continue
+                    
+                    # Preserve directory structure from /data
+                    if str(source).startswith('/data/'):
+                        relative = source.relative_to('/data')
+                        dest = tmp_path / relative
+                    else:
+                        dest = tmp_path / source.name
+                    
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    if source.is_dir():
+                        shutil.copytree(source, dest)
+                    else:
+                        shutil.copy2(source, dest)
+                
+                # Create ZIP with or without password
+                if password:
+                    # Use 7z for password-protected ZIP with AES encryption
+                    cmd = [
+                        "7z", "a", "-tzip", "-mx=5",
+                        f"-p{password}",
+                        "-mem=AES256",
+                        str(zip_path),
+                        "."
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path))
+                    if result.returncode != 0:
+                        print(f"7z error: {result.stderr}")
+                        return None
+                else:
+                    shutil.make_archive(str(backups_dir / zip_name), 'zip', tmp_path)
+            
+            return str(zip_path)
+        except Exception as e:
+            print(f"Error creating ZIP: {e}")
+            return None
+    
+    def _log(self, job_id: str, status: str, message: str, exit_code: Optional[int] = None, output: Optional[str] = None):
+        """Log job event"""
+        if self.on_log:
+            log = JobLog(
+                job_id=job_id,
+                timestamp=datetime.now(),
+                status=status,
+                message=message,
+                exit_code=exit_code,
+                output=output
+            )
+            self.on_log(log)
+    
+    def is_running(self, job_id: str) -> bool:
+        """Check if a job is currently running"""
+        return job_id in self.running_jobs
+    
+    def stop_job(self, job_id: str) -> bool:
+        """Stop a running job"""
+        if job_id in self.running_jobs:
+            process = self.running_jobs[job_id]
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            del self.running_jobs[job_id]
+            return True
+        return False
