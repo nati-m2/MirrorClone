@@ -6,7 +6,7 @@ import Badge from './ui/Badge'
 import { formatRelativeTime } from '../lib/utils'
 import cronstrue from 'cronstrue'
 
-const JobCard = ({ job, onRun, onStop, onEdit, onDelete }) => {
+const JobCard = ({ job, progress, onRun, onStop, onEdit, onDelete }) => {
   const getStatusBadge = () => {
     switch (job.status) {
       case 'running':
@@ -55,6 +55,37 @@ const JobCard = ({ job, onRun, onStop, onEdit, onDelete }) => {
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
+          {/* Progress indicator */}
+          {progress && (
+            <div className="bg-primary/10 rounded-lg p-3 border border-primary/20">
+              <div className="flex items-center gap-2 text-sm">
+                {progress.stage === 'completed' ? (
+                  <CheckCircle className="h-4 w-4 text-green-500" />
+                ) : progress.stage === 'failed' ? (
+                  <XCircle className="h-4 w-4 text-red-500" />
+                ) : (
+                  <Loader className="h-4 w-4 animate-spin text-primary" />
+                )}
+                <span className={`font-medium ${
+                  progress.stage === 'completed' ? 'text-green-500' : 
+                  progress.stage === 'failed' ? 'text-red-500' : 'text-primary'
+                }`}>
+                  {progress.message}
+                </span>
+              </div>
+              {progress.percent != null && progress.stage === 'uploading' && (
+                <div className="mt-2">
+                  <div className="h-2 bg-muted rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-primary transition-all duration-300"
+                      style={{ width: `${progress.percent}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Clock className="h-4 w-4" />
             <span>{getCronDescription()}</span>

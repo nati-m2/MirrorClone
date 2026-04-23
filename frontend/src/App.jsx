@@ -25,6 +25,7 @@ function App() {
   const [editingJob, setEditingJob] = useState(null)
   const [gdriveStatus, setGdriveStatus] = useState({ connected: false, checking: true })
   const [showConfig, setShowConfig] = useState(false)
+  const [jobProgress, setJobProgress] = useState({}) // { jobId: { stage, message, percent } }
 
   useEffect(() => {
     checkConfig()
@@ -73,6 +74,23 @@ function App() {
         const data = JSON.parse(event.data)
         if (data.event === 'job_updated') {
           fetchJobs()
+          // Clear progress when job completes
+          if (data.data?.job_id) {
+            setJobProgress(prev => {
+              const newProgress = { ...prev }
+              delete newProgress[data.data.job_id]
+              return newProgress
+            })
+          }
+        } else if (data.event === 'job_progress') {
+          setJobProgress(prev => ({
+            ...prev,
+            [data.data.job_id]: {
+              stage: data.data.stage,
+              message: data.data.message,
+              percent: data.data.percent
+            }
+          }))
         }
       }
       
@@ -324,6 +342,7 @@ function App() {
               <JobCard
                 key={job.id}
                 job={job}
+                progress={jobProgress[job.id]}
                 onRun={handleRunJob}
                 onStop={handleStopJob}
                 onEdit={handleEditJob}

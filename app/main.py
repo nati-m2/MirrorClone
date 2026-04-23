@@ -59,13 +59,37 @@ async def execute_job_wrapper(job_id: str):
         return
     
     job_manager.update_job_status(job_id, JobStatus.RUNNING)
+    await broadcaster.broadcast("job_progress", {"job_id": job_id, "stage": "preparing", "message": "מכין קבצים..."})
     
     start_time = time.time()
-    success, output, exit_code = await job_engine.execute_job(job)
+    
+    # Pass progress callback to job engine
+    async def on_progress(stage: str, message: str, percent: int = None):
+        await broadcaster.broadcast("job_progress", {
+            "job_id": job_id,
+            "stage": stage,
+            "message": message,
+            "percent": percent
+        })
+    
+    success, output, exit_code = await job_engine.execute_job(job, on_progress)
     duration = int(time.time() - start_time)
+    
+    # Format duration message
+    if duration < 60:
+        duration_msg = f"{duration} שניות"
+    else:
+        mins = duration // 60
+        secs = duration % 60
+        duration_msg = f"{mins} דקות" + (f" ו-{secs} שניות" if secs > 0 else "")
     
     if success:
         job_manager.update_job_status(job_id, JobStatus.SUCCESS, duration=duration)
+        await broadcaster.broadcast("job_progress", {
+            "job_id": job_id, 
+            "stage": "completed", 
+            "message": f"הגיבוי הסתיים בהצלחה תוך {duration_msg}"
+        })
         logs = job_manager.get_logs(job_id, limit=1)
         if logs:
             await guardian.on_job_success(job.name, logs[0])
@@ -73,6 +97,11 @@ async def execute_job_wrapper(job_id: str):
         await self_backup.backup_config()
     else:
         job_manager.update_job_status(job_id, JobStatus.FAILED, output, duration=duration)
+        await broadcaster.broadcast("job_progress", {
+            "job_id": job_id, 
+            "stage": "failed", 
+            "message": f"הגיבוי נכשל: {output[:100]}"
+        })
         logs = job_manager.get_logs(job_id, limit=1)
         if logs:
             await guardian.on_job_failed(job.name, logs[0])

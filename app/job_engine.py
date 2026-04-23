@@ -18,7 +18,7 @@ class JobEngine:
         self.on_log = on_log
         self.running_jobs: dict[str, subprocess.Popen] = {}
     
-    async def execute_job(self, job: Job) -> tuple[bool, str, int]:
+    async def execute_job(self, job: Job, on_progress=None) -> tuple[bool, str, int]:
         """Execute a backup job"""
         if job.id in self.running_jobs:
             return False, "Job is already running", -1
@@ -32,6 +32,8 @@ class JobEngine:
             # Create ZIP if needed
             if job.compress_before_upload:
                 self._log(job.id, "progress", "Creating ZIP archive...")
+                if on_progress:
+                    await on_progress("zipping", "יוצר קובץ ZIP...", 0)
                 # Run ZIP creation in thread pool to not block
                 loop = asyncio.get_event_loop()
                 zip_path = await loop.run_in_executor(
@@ -40,20 +42,24 @@ class JobEngine:
                 )
                 if zip_path:
                     self._log(job.id, "progress", f"ZIP created: {zip_path}")
-                    return await self._upload_file(job, zip_path)
+                    if on_progress:
+                        await on_progress("uploading", "מעלה קבצים...", 0)
+                    return await self._upload_file(job, zip_path, on_progress)
                 else:
                     self._log(job.id, "failed", "Failed to create ZIP archive", -1)
                     return False, "Failed to create ZIP archive", -1
             
             # No ZIP - upload each path preserving structure
-            return await self._upload_paths(job, source_paths)
+            if on_progress:
+                await on_progress("uploading", "מעלה קבצים...", 0)
+            return await self._upload_paths(job, source_paths, on_progress)
             
         except Exception as e:
             error_msg = f"Exception during backup: {str(e)}"
             self._log(job.id, "failed", error_msg, -1, str(e))
             return False, error_msg, -1
     
-    async def _upload_file(self, job: Job, file_path: str) -> tuple[bool, str, int]:
+    async def _upload_file(self, job: Job, file_path: str, on_progress=None) -> tuple[bool, str, int]:
         """Upload a single file to destination with date and time in folder name"""
         # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
         date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
@@ -67,6 +73,7 @@ class JobEngine:
             dest,
             "--config", str(self.config_path),
             "--transfers", "4",
+            "--progress",
         ]
         
         self._log(job.id, "progress", f"Uploading to: {dest}")
@@ -88,7 +95,7 @@ class JobEngine:
             self._log(job.id, "failed", f"Upload failed: {result.stderr}", result.returncode)
             return False, result.stderr, result.returncode
     
-    async def _upload_paths(self, job: Job, source_paths: list[str]) -> tuple[bool, str, int]:
+    async def _upload_paths(self, job: Job, source_paths: list[str], on_progress=None) -> tuple[bool, str, int]:
         """Upload multiple paths preserving directory structure with date and time in folder name"""
         # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
         date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
@@ -96,7 +103,20 @@ class JobEngine:
         dated_folder = f"{clean_name}-{date_str}"
         base_dest = f"{job.destination.rstrip('/')}/{dated_folder}"
         
-        self._log(job.id, "progress", f"Uploading {len(source_paths)} item(s) to {base_dest}")
+        # Calculate total size
+        total_size = 0
+        for source_path in source_paths:
+            path = Path(source_path)
+            if path.exists():
+                if path.is_file():
+                    total_size += path.stat().st_size
+                else:
+                    for f in path.rglob('*'):
+                        if f.is_file():
+                            total_size += f.stat().st_size
+        
+        size_mb = total_size / (1024 * 1024)
+        self._log(job.id, "progress", f"Uploading {len(source_paths)} item(s) ({size_mb:.1f} MB) to {base_dest}")
         
         # Create a files-from list for rclone
         files_list = []
@@ -107,7 +127,6 @@ class JobEngine:
                 files_list.append(source_path)
         
         # Write files list to temp file
-        import tempfile
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
             f.write('\n'.join(files_list))
             files_from_path = f.name
@@ -121,27 +140,64 @@ class JobEngine:
                 "--files-from", files_from_path,
                 "--transfers", "4",
                 "--checkers", "8",
+                "--stats", "1s",
+                "--stats-one-line",
+                "-v",
             ]
             
-            # Run in thread pool to not block event loop
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, 
-                lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            result_code, result_output = await loop.run_in_executor(
+                None,
+                lambda: self._run_rclone_with_progress(cmd, on_progress, loop)
             )
+            
         finally:
             # Clean up temp file
             Path(files_from_path).unlink(missing_ok=True)
         
-        if result.returncode == 0:
+        if result_code == 0:
             # Cleanup old backups if retention is set
             if job.retention_count > 0:
                 await self._cleanup_old_backups_async(job, clean_name)
             self._log(job.id, "success", f"Backup completed: {base_dest}", 0)
             return True, f"Backup completed: {base_dest}", 0
         else:
-            self._log(job.id, "failed", f"Upload failed: {result.stderr}", result.returncode)
-            return False, result.stderr, result.returncode
+            self._log(job.id, "failed", f"Upload failed: {result_output}", result_code)
+            return False, result_output, result_code
+    
+    def _run_rclone_with_progress(self, cmd, on_progress, loop):
+        """Run rclone and parse progress"""
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        
+        last_percent = -1
+        output_lines = []
+        
+        for line in process.stdout:
+            output_lines.append(line)
+            # Parse rclone progress: "Transferred: 1.234 MiB / 5.678 MiB, 22%"
+            if '%' in line:
+                try:
+                    percent_match = re.search(r'(\d+)%', line)
+                    if percent_match:
+                        percent = int(percent_match.group(1))
+                        if percent != last_percent:
+                            last_percent = percent
+                            if on_progress and loop:
+                                asyncio.run_coroutine_threadsafe(
+                                    on_progress("uploading", f"מעלה קבצים... {percent}%", percent),
+                                    loop
+                                )
+                except:
+                    pass
+        
+        process.wait()
+        return (process.returncode, ''.join(output_lines))
     
     def _cleanup_old_backups(self, job: Job, job_name_prefix: str):
         """Keep only the latest N backups"""
