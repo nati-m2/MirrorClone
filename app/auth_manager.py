@@ -91,19 +91,36 @@ class AuthManager:
         except Exception:
             return None
     
-    def start_google_drive_auth(self, remote_name: str = "gdrive") -> Dict[str, str]:
-        """Start Google Drive OAuth authentication process with loopback redirect"""
+    def start_google_drive_auth(self, remote_name: str = "gdrive", base_url: str = None) -> Dict[str, str]:
+        """Start Google Drive OAuth authentication process"""
         try:
             state = secrets.token_urlsafe(32)
             self.config_dir.mkdir(parents=True, exist_ok=True)
             
-            # Generate OAuth URL with loopback redirect
-            # User will copy the redirect URL containing the code
-            # Using rclone's built-in OAuth client ID
+            # Check if using custom Client ID (not rclone's default)
+            rclone_default_client = "202264815644.apps.googleusercontent.com"
+            using_custom_client = settings.google_client_id != rclone_default_client
+            
+            # Determine redirect URI
+            if using_custom_client:
+                # Custom Client ID - can use server's callback URL
+                if settings.oauth_redirect_uri:
+                    redirect_uri = settings.oauth_redirect_uri
+                elif base_url:
+                    redirect_uri = f"{base_url.rstrip('/')}/api/auth/google-drive/callback"
+                else:
+                    redirect_uri = "http://127.0.0.1:53682/"
+                auto_redirect = True
+            else:
+                # Using rclone's Client ID - must use localhost (manual flow)
+                redirect_uri = "http://127.0.0.1:53682/"
+                auto_redirect = False
+            
+            from urllib.parse import quote
             auth_url = (
                 "https://accounts.google.com/o/oauth2/auth?"
-                "client_id=202264815644.apps.googleusercontent.com&"
-                "redirect_uri=http://127.0.0.1:53682/&"
+                f"client_id={settings.google_client_id}&"
+                f"redirect_uri={quote(redirect_uri, safe='')}&"
                 "response_type=code&"
                 "scope=https://www.googleapis.com/auth/drive&"
                 f"state={state}&"
@@ -111,10 +128,11 @@ class AuthManager:
                 "prompt=consent"
             )
             
-            # Save state
+            # Save state with redirect URI
             state_data = {
                 "state": state,
                 "remote_name": remote_name,
+                "redirect_uri": redirect_uri,
                 "timestamp": datetime.now().isoformat()
             }
             with self._config_lock:
@@ -124,14 +142,16 @@ class AuthManager:
                 "auth_url": auth_url,
                 "state": state,
                 "remote_name": remote_name,
-                "message": "Open the URL, authorize, then copy the full URL from the browser address bar"
+                "redirect_uri": redirect_uri,
+                "auto_redirect": auto_redirect,
+                "message": "Open the URL and authorize access" if auto_redirect else "Open the URL, authorize, then copy the redirect URL"
             }
                 
         except Exception as e:
             return {"error": f"Authorization failed: {str(e)}"}
     
     def exchange_code_for_token(self, code: str, remote_name: str = "gdrive") -> tuple[bool, str]:
-        """Exchange authorization code for token (loopback flow)"""
+        """Exchange authorization code for token"""
         with self._config_lock:
             try:
                 # Extract code from URL if full URL was pasted
@@ -139,20 +159,29 @@ class AuthManager:
                 if "code=" in actual_code:
                     # Parse code from URL
                     from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(actual_code.replace("http://127.0.0.1:53682/?" , "http://127.0.0.1:53682/?"))
+                    parsed = urlparse(actual_code)
                     params = parse_qs(parsed.query)
                     if "code" in params:
                         actual_code = params["code"][0]
                     else:
                         return False, "Could not find authorization code in URL"
                 
-                # Exchange code for token using loopback redirect URI
+                # Get redirect URI from saved state
+                redirect_uri = "http://127.0.0.1:53682/"
+                if self.oauth_state_file.exists():
+                    try:
+                        state_data = json.loads(self.oauth_state_file.read_text())
+                        redirect_uri = state_data.get("redirect_uri", redirect_uri)
+                    except:
+                        pass
+                
+                # Exchange code for token
                 token_url = "https://oauth2.googleapis.com/token"
                 data = {
                     "code": actual_code,
-                    "client_id": "202264815644.apps.googleusercontent.com",
-                    "client_secret": "X4Z3ca8xfWDb1Voo-F9a7ZxJ",  # rclone's public secret
-                    "redirect_uri": "http://127.0.0.1:53682/",
+                    "client_id": settings.google_client_id,
+                    "client_secret": settings.google_client_secret,
+                    "redirect_uri": redirect_uri,
                     "grant_type": "authorization_code"
                 }
                 

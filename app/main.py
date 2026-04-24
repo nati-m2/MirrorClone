@@ -290,9 +290,11 @@ async def test_remote(remote_name: str):
 
 
 @app.post("/api/auth/google-drive/start")
-async def start_google_drive_auth(remote_name: str = "gdrive"):
+async def start_google_drive_auth(request: Request, remote_name: str = "gdrive"):
     """Start Google Drive OAuth flow"""
-    result = auth_manager.start_google_drive_auth(remote_name)
+    # Get base URL from request for redirect URI
+    base_url = str(request.base_url).rstrip('/')
+    result = auth_manager.start_google_drive_auth(remote_name, base_url)
     if "error" in result:
         raise HTTPException(status_code=500, detail=result["error"])
     return result
@@ -313,54 +315,90 @@ async def exchange_google_drive_code(remote_name: str = "gdrive", code: str = ""
 
 @app.get("/api/auth/google-drive/callback")
 async def google_drive_oauth_callback(code: str, state: str):
-    """Handle OAuth callback from Google (legacy - redirects to manual entry)"""
-    # With OOB flow, this callback won't be used, but keep for compatibility
-    return HTMLResponse(content=f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Authorization Code</title>
-        <style>
-            body {{
-                font-family: system-ui, -apple-system, sans-serif;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                height: 100vh;
-                margin: 0;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-            }}
-            .container {{
-                text-align: center;
-                background: rgba(255, 255, 255, 0.1);
-                padding: 3rem;
-                border-radius: 1rem;
-                backdrop-filter: blur(10px);
-                max-width: 500px;
-            }}
-            .code {{
-                background: rgba(0,0,0,0.3);
-                padding: 1rem;
-                border-radius: 0.5rem;
-                font-family: monospace;
-                word-break: break-all;
-                margin: 1rem 0;
-            }}
-            h1 {{ margin: 0 0 1rem 0; }}
-            p {{ opacity: 0.9; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>📋 Copy This Code</h1>
-            <p>Copy the code below and paste it in the application:</p>
-            <div class="code">{code}</div>
-            <p style="font-size: 0.9rem;">You can close this window after copying.</p>
-        </div>
-    </body>
-    </html>
-    """)
+    """Handle OAuth callback from Google - automatically exchange code for token"""
+    success, message = auth_manager.handle_oauth_callback(code, state)
+    
+    if success:
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authorization Complete</title>
+            <style>
+                body {
+                    font-family: system-ui, -apple-system, sans-serif;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                    color: white;
+                }
+                .container {
+                    text-align: center;
+                    background: rgba(255, 255, 255, 0.1);
+                    padding: 3rem;
+                    border-radius: 1rem;
+                    backdrop-filter: blur(10px);
+                    max-width: 500px;
+                }
+                h1 { margin: 0 0 1rem 0; }
+                p { opacity: 0.9; }
+            </style>
+            <script>
+                setTimeout(() => window.close(), 3000);
+            </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>✅ Connected Successfully!</h1>
+                <p>Google Drive has been connected.</p>
+                <p style="font-size: 0.9rem;">This window will close automatically...</p>
+            </div>
+        </body>
+        </html>
+        """)
+    else:
+        return HTMLResponse(content=f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authorization Failed</title>
+            <style>
+                body {{
+                    font-family: system-ui, -apple-system, sans-serif;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+                    color: white;
+                }}
+                .container {{
+                    text-align: center;
+                    background: rgba(255, 255, 255, 0.1);
+                    padding: 3rem;
+                    border-radius: 1rem;
+                    backdrop-filter: blur(10px);
+                    max-width: 500px;
+                }}
+                h1 {{ margin: 0 0 1rem 0; }}
+                p {{ opacity: 0.9; }}
+                .error {{ background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 0.5rem; margin: 1rem 0; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>❌ Authorization Failed</h1>
+                <p>Could not connect to Google Drive:</p>
+                <div class="error">{message}</div>
+                <p style="font-size: 0.9rem;">Please close this window and try again.</p>
+            </div>
+        </body>
+        </html>
+        """, status_code=400)
 
 
 @app.post("/api/auth/google-drive/complete")

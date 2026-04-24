@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     smtp_from: str = ""
     
+    # Google OAuth - use custom Client ID for proper redirect
+    google_client_id: str = "202264815644.apps.googleusercontent.com"  # rclone default
+    google_client_secret: str = "X4Z3ca8xfWDb1Voo-F9a7ZxJ"  # rclone default
+    oauth_redirect_uri: str = ""  # Empty = auto-detect from request
+    
     alert_emails: list[str] = []
     
     class Config:

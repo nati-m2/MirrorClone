@@ -7,7 +7,7 @@ from app.config import settings
 class SelfBackup:
     """Handles backup of configuration files to cloud"""
     
-    def __init__(self, remote_name: str = "gdrive", backup_folder: str = "backups/mirrorclone-config"):
+    def __init__(self, remote_name: str = "gdrive", backup_folder: str = "MirrorCloneBackups/mirrorclone-config"):
         self.remote_name = remote_name
         self.backup_folder = backup_folder
         self.config_path = settings.rclone_config

@@ -14,6 +14,8 @@ const ConfigSetup = ({ onConfigured }) => {
   const [remoteName, setRemoteName] = useState('gdrive')
   const [showCodeInput, setShowCodeInput] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [autoRedirect, setAutoRedirect] = useState(false)
+  const [waitingForCallback, setWaitingForCallback] = useState(false)
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0]
@@ -55,6 +57,7 @@ const ConfigSetup = ({ onConfigured }) => {
     setMessage('')
     setShowCodeInput(false)
     setAuthCode('')
+    setWaitingForCallback(false)
 
     try {
       const response = await startGoogleDriveAuth('gdrive')
@@ -62,11 +65,44 @@ const ConfigSetup = ({ onConfigured }) => {
       if (response.data.auth_url) {
         setAuthUrl(response.data.auth_url)
         setRemoteName(response.data.remote_name || 'gdrive')
-        setShowCodeInput(true)
+        setAutoRedirect(response.data.auto_redirect || false)
         setConnecting(false)
         
-        // Open the auth URL in a new tab
-        window.open(response.data.auth_url, '_blank')
+        if (response.data.auto_redirect) {
+          // Auto redirect mode - open popup and wait for callback
+          setWaitingForCallback(true)
+          const authWindow = window.open(response.data.auth_url, '_blank', 'width=600,height=700')
+          
+          // Poll to check if auth completed
+          const pollInterval = setInterval(async () => {
+            try {
+              // Check if config is now valid
+              const checkResponse = await fetch('/api/config/status')
+              const status = await checkResponse.json()
+              if (status.configured) {
+                clearInterval(pollInterval)
+                setWaitingForCallback(false)
+                setMessage('Successfully connected to Google Drive!')
+                setTimeout(() => onConfigured(), 1500)
+              }
+            } catch (e) {
+              // Ignore errors during polling
+            }
+          }, 2000)
+          
+          // Stop polling after 5 minutes
+          setTimeout(() => {
+            clearInterval(pollInterval)
+            if (waitingForCallback) {
+              setWaitingForCallback(false)
+              setShowCodeInput(true) // Fall back to manual mode
+            }
+          }, 300000)
+        } else {
+          // Manual mode - show code input
+          setShowCodeInput(true)
+          window.open(response.data.auth_url, '_blank')
+        }
       } else {
         setMessage('Failed to start Google Drive authentication')
         setConnecting(false)
@@ -111,6 +147,7 @@ const ConfigSetup = ({ onConfigured }) => {
 
   const cancelAuth = () => {
     setShowCodeInput(false)
+    setWaitingForCallback(false)
     setAuthCode('')
     setAuthUrl('')
     setMessage('')
@@ -126,7 +163,21 @@ const ConfigSetup = ({ onConfigured }) => {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!showCodeInput ? (
+          {waitingForCallback ? (
+            <div className="border-2 border-primary/30 rounded-lg p-8 text-center bg-primary/5">
+              <Loader className="h-12 w-12 mx-auto text-primary mb-4 animate-spin" />
+              <p className="text-lg font-medium mb-2">
+                Waiting for Authorization...
+              </p>
+              <p className="text-sm text-muted-foreground mb-4">
+                Complete the authorization in the popup window.<br />
+                This page will update automatically.
+              </p>
+              <Button variant="ghost" onClick={cancelAuth}>
+                Cancel
+              </Button>
+            </div>
+          ) : !showCodeInput ? (
             <div className="border-2 border-dashed border-primary/20 rounded-lg p-8 text-center bg-primary/5">
               <Chrome className="h-12 w-12 mx-auto text-primary mb-4" />
               <p className="text-sm font-medium mb-2">
