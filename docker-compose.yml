@@ -10,7 +10,7 @@ services:
     volumes:
       - ./mirrorclone/config:/config
       - ./mirrorclone/backups:/backups
-      - D:/test:/data:ro
+      - /srv/link_appdata:/data:ro
     environment:
       - TZ=Asia/Jerusalem
       - SMTP_HOST=${SMTP_HOST:-}

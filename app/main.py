@@ -298,106 +298,69 @@ async def start_google_drive_auth(remote_name: str = "gdrive"):
     return result
 
 
+@app.post("/api/auth/google-drive/exchange-code")
+async def exchange_google_drive_code(remote_name: str = "gdrive", code: str = ""):
+    """Exchange authorization code for token (OOB flow)"""
+    if not code or not code.strip():
+        raise HTTPException(status_code=400, detail="Authorization code is required")
+    
+    success, message = auth_manager.exchange_code_for_token(code.strip(), remote_name)
+    if success:
+        return {"message": message, "success": True}
+    else:
+        raise HTTPException(status_code=400, detail=message)
+
+
 @app.get("/api/auth/google-drive/callback")
 async def google_drive_oauth_callback(code: str, state: str):
-    """Handle OAuth callback from Google"""
-    success, message = auth_manager.handle_oauth_callback(code, state)
-    
-    if success:
-        # Return HTML that closes the window and notifies parent
-        return HTMLResponse(content=f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Authorization Successful</title>
-            <style>
-                body {{
-                    font-family: system-ui, -apple-system, sans-serif;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    height: 100vh;
-                    margin: 0;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                }}
-                .container {{
-                    text-align: center;
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 3rem;
-                    border-radius: 1rem;
-                    backdrop-filter: blur(10px);
-                }}
-                .success-icon {{
-                    font-size: 4rem;
-                    margin-bottom: 1rem;
-                }}
-                h1 {{ margin: 0 0 1rem 0; }}
-                p {{ opacity: 0.9; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="success-icon">✓</div>
-                <h1>Authorization Successful!</h1>
-                <p>{message}</p>
-                <p style="margin-top: 2rem; font-size: 0.9rem;">You can close this window now.</p>
-            </div>
-            <script>
-                // Notify parent window and close
-                if (window.opener) {{
-                    window.opener.postMessage({{type: 'oauth-success'}}, '*');
-                }}
-                setTimeout(() => window.close(), 2000);
-            </script>
-        </body>
-        </html>
-        """)
-    else:
-        return HTMLResponse(content=f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Authorization Failed</title>
-            <style>
-                body {{
-                    font-family: system-ui, -apple-system, sans-serif;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    height: 100vh;
-                    margin: 0;
-                    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-                    color: white;
-                }}
-                .container {{
-                    text-align: center;
-                    background: rgba(255, 255, 255, 0.1);
-                    padding: 3rem;
-                    border-radius: 1rem;
-                    backdrop-filter: blur(10px);
-                }}
-                .error-icon {{
-                    font-size: 4rem;
-                    margin-bottom: 1rem;
-                }}
-                h1 {{ margin: 0 0 1rem 0; }}
-                p {{ opacity: 0.9; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="error-icon">✗</div>
-                <h1>Authorization Failed</h1>
-                <p>{message}</p>
-                <p style="margin-top: 2rem; font-size: 0.9rem;">Please try again.</p>
-            </div>
-            <script>
-                setTimeout(() => window.close(), 3000);
-            </script>
-        </body>
-        </html>
-        """, status_code=400)
+    """Handle OAuth callback from Google (legacy - redirects to manual entry)"""
+    # With OOB flow, this callback won't be used, but keep for compatibility
+    return HTMLResponse(content=f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Authorization Code</title>
+        <style>
+            body {{
+                font-family: system-ui, -apple-system, sans-serif;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                height: 100vh;
+                margin: 0;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }}
+            .container {{
+                text-align: center;
+                background: rgba(255, 255, 255, 0.1);
+                padding: 3rem;
+                border-radius: 1rem;
+                backdrop-filter: blur(10px);
+                max-width: 500px;
+            }}
+            .code {{
+                background: rgba(0,0,0,0.3);
+                padding: 1rem;
+                border-radius: 0.5rem;
+                font-family: monospace;
+                word-break: break-all;
+                margin: 1rem 0;
+            }}
+            h1 {{ margin: 0 0 1rem 0; }}
+            p {{ opacity: 0.9; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📋 Copy This Code</h1>
+            <p>Copy the code below and paste it in the application:</p>
+            <div class="code">{code}</div>
+            <p style="font-size: 0.9rem;">You can close this window after copying.</p>
+        </div>
+    </body>
+    </html>
+    """)
 
 
 @app.post("/api/auth/google-drive/complete")

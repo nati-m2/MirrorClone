@@ -9,14 +9,11 @@ __pycache__
 *.so
 *.egg
 *.egg-info
-dist
 build
 .idea
 .vscode
 config/
 frontend/node_modules
-frontend/src
-frontend/package*.json
-frontend/*.config.js
+frontend/dist
 README.md
 .env

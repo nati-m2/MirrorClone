@@ -35,6 +35,9 @@ export const testNotifications = () => api.post('/test/notifications')
 export const startGoogleDriveAuth = (remoteName = 'gdrive') => 
   api.post('/auth/google-drive/start', null, { params: { remote_name: remoteName } })
 
+export const exchangeGoogleDriveCode = (remoteName, code) => 
+  api.post('/auth/google-drive/exchange-code', null, { params: { remote_name: remoteName, code } })
+
 export const completeGoogleDriveAuth = (remoteName, token) => 
   api.post('/auth/google-drive/complete', null, { params: { remote_name: remoteName, token } })
 
