@@ -970,22 +970,137 @@ class _RcloneRemoteFile:
         self.close()
 
 
+# In-memory cache of ZIP entry listings keyed by (remote_path, size).
+# Avoids re-reading the central directory when the user navigates between
+# sub-folders of the same archive.
+_REMOTE_ZIP_ENTRY_CACHE: dict = {}
+_REMOTE_ZIP_CACHE_MAX = 32
+
+
+def _read_remote_range(remote_path: str, offset: int, count: int, timeout: int = 180) -> bytes:
+    """Fetch a single byte range from a remote file via `rclone cat`."""
+    import subprocess as _sub
+    res = _sub.run(
+        ["rclone", "cat", remote_path,
+         "--offset", str(offset),
+         "--count", str(count),
+         "--config", str(auth_manager.config_path)],
+        capture_output=True, timeout=timeout
+    )
+    if res.returncode != 0:
+        raise IOError(f"rclone cat failed at offset {offset}: {res.stderr!r}")
+    return res.stdout or b""
+
+
+def _fetch_remote_zip_entries(remote_zip_path: str, zip_size: int) -> list:
+    """Return [{name, size, is_dir}, ...] for all entries in a remote ZIP,
+    using only ONE byte-range read for the central directory tail.
+
+    Strategy: read the last min(1MB, zip_size) bytes (covers EOCD + most CDs),
+    then let zipfile parse from BytesIO. Fall back to a larger read for very
+    large central directories.
+    """
+    import io
+    import zipfile as _zipfile
+
+    cache_key = (remote_zip_path, zip_size)
+    cached = _REMOTE_ZIP_ENTRY_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Initial tail size: 1 MiB or whole file, whichever is smaller.
+    tail_size = min(1024 * 1024, zip_size)
+
+    def _try_with_tail(tail_bytes: int) -> Optional[list]:
+        offset = max(0, zip_size - tail_bytes)
+        data = _read_remote_range(remote_zip_path, offset, tail_bytes)
+        if len(data) < 22:  # ZIP EOCD is at least 22 bytes
+            return None
+        # Build a sparse buffer: pad with zeros from 0..offset, then real bytes.
+        # zipfile only seeks within the real (tail) region after locating EOCD,
+        # so we just need a file-like that returns 0xFF for unread regions.
+        class _Tail(io.RawIOBase):
+            def __init__(self, padding: int, payload: bytes):
+                self._padding = padding
+                self._payload = payload
+                self._pos = 0
+                self._size = padding + len(payload)
+            def readable(self):
+                return True
+            def seekable(self):
+                return True
+            def tell(self):
+                return self._pos
+            def seek(self, off, whence=0):
+                if whence == 0:
+                    self._pos = off
+                elif whence == 1:
+                    self._pos += off
+                elif whence == 2:
+                    self._pos = self._size + off
+                if self._pos < 0:
+                    self._pos = 0
+                return self._pos
+            def read(self, n=-1):
+                if self._pos >= self._size:
+                    return b""
+                if n is None or n < 0:
+                    n = self._size - self._pos
+                end = min(self._size, self._pos + n)
+                if end <= self._padding:
+                    out = b"\x00" * (end - self._pos)
+                elif self._pos >= self._padding:
+                    s = self._pos - self._padding
+                    e = end - self._padding
+                    out = self._payload[s:e]
+                else:
+                    pad_part = b"\x00" * (self._padding - self._pos)
+                    payload_part = self._payload[: end - self._padding]
+                    out = pad_part + payload_part
+                self._pos = end
+                return out
+
+        tail_fp = _Tail(offset, data)
+        try:
+            with _zipfile.ZipFile(tail_fp, 'r') as zf:
+                return [
+                    {"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()}
+                    for info in zf.infolist()
+                ]
+        except _zipfile.BadZipFile:
+            return None
+
+    entries = _try_with_tail(tail_size)
+    if entries is None and tail_size < zip_size:
+        # Central directory is larger than 1MB - try 8MB then full file size.
+        for bigger in (8 * 1024 * 1024, zip_size):
+            entries = _try_with_tail(min(bigger, zip_size))
+            if entries is not None:
+                break
+
+    if entries is None:
+        raise IOError("Could not parse ZIP central directory from remote tail")
+
+    # Cache the result (basic size-bounded cache)
+    if len(_REMOTE_ZIP_ENTRY_CACHE) >= _REMOTE_ZIP_CACHE_MAX:
+        _REMOTE_ZIP_ENTRY_CACHE.pop(next(iter(_REMOTE_ZIP_ENTRY_CACHE)))
+    _REMOTE_ZIP_ENTRY_CACHE[cache_key] = entries
+    return entries
+
+
 def _browse_remote_zip_via_byterange(remote_zip_path: str, zip_size: Optional[int],
                                      backup_path: str, sub_path: str):
     """Open a remote ZIP over rclone byte ranges and list its central directory.
 
-    Avoids downloading the full archive. Uses Python's stdlib zipfile which
-    reads only the End-of-Central-Directory + Central Directory (tens of KB).
-    Raises on failure so the caller can fall back to a full download.
+    Reads only the tail of the archive (typically <1MB) in a SINGLE rclone call
+    and caches the resulting entry list in memory for instant sub-folder browsing.
     """
-    import zipfile as _zipfile
+    if not zip_size:
+        # Need to know the size to read from the tail; fall back to lsjson once.
+        rf = _RcloneRemoteFile(remote_zip_path, auth_manager.config_path)
+        zip_size = rf._ensure_size()
 
-    rf = _RcloneRemoteFile(remote_zip_path, auth_manager.config_path, size=zip_size)
-    with _zipfile.ZipFile(rf, 'r') as zf:
-        entries = [
-            {"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()}
-            for info in zf.infolist()
-        ]
+    entries = _fetch_remote_zip_entries(remote_zip_path, zip_size)
     return _browse_manifest(
         {"entries": entries, "zip_filename": Path(remote_zip_path).name},
         backup_path, sub_path,
