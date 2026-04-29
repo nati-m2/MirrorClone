@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
+from typing import Optional
 import asyncio
 import json
 
@@ -908,6 +909,71 @@ def _ensure_remote_zip_cached(remote_zip_path: str) -> Path:
     return local_zip
 
 
+def _try_fetch_manifest(remote_manifest_path: str) -> Optional[dict]:
+    """Try to download a small remote manifest.json into memory and return its parsed dict.
+    Returns None if the manifest does not exist or fails to download.
+    """
+    import subprocess as _sub
+    try:
+        res = _sub.run(
+            ["rclone", "cat", remote_manifest_path,
+             "--config", str(auth_manager.config_path)],
+            capture_output=True, text=True, timeout=60
+        )
+        if res.returncode != 0 or not res.stdout.strip():
+            return None
+        return json.loads(res.stdout)
+    except Exception as e:
+        print(f"Manifest fetch failed: {e}")
+        return None
+
+
+def _browse_manifest(manifest: dict, backup_path: str, sub_path: str):
+    """Build a directory listing at `sub_path` from a flat manifest of entries."""
+    entries = manifest.get("entries", [])
+    prefix = sub_path.rstrip('/') + '/' if sub_path else ''
+    seen_dirs = set()
+    items = []
+    for entry in entries:
+        name = entry.get("name", "")
+        if not name or not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        if not rest or rest == '/':
+            continue
+        parts = rest.split('/')
+        child_name = parts[0]
+        if not child_name:
+            continue
+        is_dir = len(parts) > 1 or entry.get("is_dir", False)
+        child_path = (prefix + child_name).lstrip('/')
+        if is_dir:
+            if child_name not in seen_dirs:
+                seen_dirs.add(child_name)
+                items.append({
+                    "name": child_name,
+                    "path": child_path,
+                    "type": "directory",
+                    "size": 0,
+                })
+        else:
+            items.append({
+                "name": child_name,
+                "path": child_path,
+                "type": "file",
+                "size": entry.get("size", 0),
+            })
+    items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
+    return {
+        "backup_path": backup_path,
+        "sub_path": sub_path,
+        "parent_sub_path": str(Path(sub_path).parent) if sub_path and sub_path != "." else None,
+        "items": items,
+        "source": "remote_manifest",
+        "is_zip": True,
+    }
+
+
 @app.get("/api/restore/browse")
 async def browse_backup(backup_path: str, sub_path: str = ""):
     """Browse files inside a backup snapshot.
@@ -943,42 +1009,32 @@ async def browse_backup(backup_path: str, sub_path: str = ""):
         )
         return res
 
-    # When at top level (no sub_path), peek inside the snapshot folder. If it
-    # contains exactly one ZIP, transparently dive into it.
-    if not sub_path:
-        try:
-            top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
-            if top.returncode == 0 and top.stdout.strip():
-                top_items = json.loads(top.stdout)
-                zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
-                non_zip = [i for i in top_items if i not in zip_files]
-                if len(zip_files) == 1 and not non_zip:
-                    remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
-                    cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
-                    return _browse_local_zip(cached_zip, backup_path, "", source_label="remote_zip")
-        except HTTPException:
-            raise
-        except Exception as e:
-            print(f"browse_backup: top-level peek failed: {e}")
-
-    # If the user is already navigating inside a ZIP cached locally, keep using it.
-    # We detect this by checking whether a cached ZIP exists for this backup_path.
+    # ── Fast path: try to use a sidecar manifest.json next to the ZIP ─────────
+    # This avoids downloading the (potentially huge) ZIP just for browsing.
     try:
-        # Try to find a cached ZIP for this backup_path (any zip file under it)
-        # by re-running the top-level listing once (cheap) – we pick the first .zip.
-        if sub_path:
-            top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
-            if top.returncode == 0 and top.stdout.strip():
-                top_items = json.loads(top.stdout)
-                zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
-                if len(zip_files) == 1:
-                    remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
-                    cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
-                    return _browse_local_zip(cached_zip, backup_path, sub_path, source_label="remote_zip")
+        top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
+        if top.returncode == 0 and top.stdout.strip():
+            top_items = json.loads(top.stdout)
+            zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
+            manifest_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").endswith(".manifest.json")]
+            non_special = [i for i in top_items if i not in zip_files and i not in manifest_files]
+
+            # Prefer manifest if available - this is the fast path.
+            if manifest_files and len(zip_files) == 1 and not non_special:
+                remote_manifest = f"{backup_path.rstrip('/')}/{manifest_files[0]['Name']}"
+                manifest = await loop.run_in_executor(None, lambda: _try_fetch_manifest(remote_manifest))
+                if manifest:
+                    return _browse_manifest(manifest, backup_path, sub_path)
+
+            # Fallback: download the full ZIP and browse it locally.
+            if len(zip_files) == 1 and not non_special:
+                remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
+                cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
+                return _browse_local_zip(cached_zip, backup_path, sub_path, source_label="remote_zip")
     except HTTPException:
         raise
     except Exception as e:
-        print(f"browse_backup: cached-zip path failed: {e}")
+        print(f"browse_backup: manifest/zip path failed: {e}")
 
     # ── Plain remote folder listing (no ZIP, or multiple files) ───────────────
     full_path = f"{backup_path.rstrip('/')}/{sub_path}".rstrip('/')

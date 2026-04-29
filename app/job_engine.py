@@ -63,13 +63,16 @@ class JobEngine:
             return False, error_msg, -1
     
     async def _upload_file(self, job: Job, file_path: str, on_progress=None) -> tuple[bool, str, int]:
-        """Upload a single file to destination with date and time in folder name"""
+        """Upload a single file to destination with date and time in folder name.
+        If a sidecar manifest (file_path + '.manifest.json') exists, it is uploaded
+        alongside so remote browsing can use it without downloading the full ZIP.
+        """
         # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
         date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
         clean_name = "".join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name)
         dated_folder = f"{clean_name}-{date_str}"
         dest = f"{job.destination.rstrip('/')}/{dated_folder}"
-        
+
         cmd = [
             "rclone", "copy",
             file_path,
@@ -78,17 +81,34 @@ class JobEngine:
             "--transfers", "4",
             "--progress",
         ]
-        
+
         self._log(job.id, "progress", f"Uploading to: {dest}")
-        
+
         # Run in thread pool to not block event loop
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         )
-        
+
         if result.returncode == 0:
+            # Upload sidecar manifest if it exists (best-effort, non-fatal)
+            manifest_path = Path(file_path + ".manifest.json")
+            if manifest_path.exists():
+                manifest_cmd = [
+                    "rclone", "copy",
+                    str(manifest_path),
+                    dest,
+                    "--config", str(self.config_path),
+                ]
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: subprocess.run(manifest_cmd, capture_output=True, text=True, timeout=120)
+                    )
+                except Exception as e:
+                    print(f"Warning: failed to upload manifest: {e}")
+
             # Cleanup old backups if retention is set
             if job.retention_count > 0:
                 await self._cleanup_old_backups_async(job, clean_name)
@@ -374,11 +394,80 @@ class JobEngine:
                 else:
                     shutil.make_archive(str(backups_dir / zip_name), 'zip', tmp_path)
             
+            # Create manifest.json with the file tree (for fast remote browsing)
+            try:
+                self._create_zip_manifest(zip_path, encrypted=bool(password))
+            except Exception as e:
+                # Manifest is best-effort; do not fail the backup if it can't be created
+                print(f"Warning: failed to create manifest for {zip_path}: {e}")
+
             return str(zip_path)
         except Exception as e:
             print(f"Error creating ZIP: {e}")
             return None
-    
+
+    def _create_zip_manifest(self, zip_path: Path, encrypted: bool = False) -> Optional[Path]:
+        """Create a sidecar manifest.json next to the ZIP listing all entries with sizes.
+
+        This allows browsing remote backups without downloading the full ZIP -
+        only the small manifest needs to be fetched.
+        """
+        import zipfile as _zipfile
+        import json as _json
+
+        manifest_path = zip_path.with_suffix(zip_path.suffix + ".manifest.json")
+        entries = []
+
+        if encrypted:
+            # 7z-encrypted ZIPs cannot be read by stdlib zipfile without password.
+            # Fall back to using 7z to list contents.
+            try:
+                result = subprocess.run(
+                    ["7z", "l", "-slt", str(zip_path)],
+                    capture_output=True, text=True, timeout=120
+                )
+                if result.returncode == 0:
+                    current = {}
+                    for line in result.stdout.splitlines():
+                        line = line.strip()
+                        if not line:
+                            if current.get("Path") and current.get("Path") not in (".", ""):
+                                attr = current.get("Attributes", "")
+                                is_dir = "D" in attr.split()[0] if attr else False
+                                size = int(current.get("Size", 0) or 0)
+                                entries.append({
+                                    "name": current["Path"].replace("\\", "/"),
+                                    "size": size,
+                                    "is_dir": is_dir,
+                                })
+                            current = {}
+                            continue
+                        if " = " in line:
+                            k, v = line.split(" = ", 1)
+                            current[k.strip()] = v.strip()
+            except Exception as e:
+                print(f"7z list failed: {e}")
+                return None
+        else:
+            with _zipfile.ZipFile(str(zip_path), 'r') as zf:
+                for info in zf.infolist():
+                    entries.append({
+                        "name": info.filename,
+                        "size": info.file_size,
+                        "is_dir": info.is_dir(),
+                    })
+
+        manifest = {
+            "version": 1,
+            "zip_filename": zip_path.name,
+            "encrypted": encrypted,
+            "created_at": datetime.now().isoformat(),
+            "entries": entries,
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            _json.dump(manifest, f, ensure_ascii=False)
+        return manifest_path
+
     def _log(self, job_id: str, status: str, message: str, exit_code: Optional[int] = None, output: Optional[str] = None):
         """Log job event"""
         if self.on_log:
