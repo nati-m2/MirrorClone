@@ -64,8 +64,8 @@ class JobEngine:
     
     async def _upload_file(self, job: Job, file_path: str, on_progress=None) -> tuple[bool, str, int]:
         """Upload a single file to destination with date and time in folder name.
-        If a sidecar manifest (file_path + '.manifest.json') exists, it is uploaded
-        alongside so remote browsing can use it without downloading the full ZIP.
+        Streams rclone progress via _run_rclone_with_progress to avoid pipe-buffer
+        deadlocks when --progress produces large volumes of output.
         """
         # Create dated folder: JobName-DD.MM.YYYY-HH:MM:SS
         date_str = datetime.now().strftime("%d.%m.%Y-%H:%M:%S")
@@ -79,27 +79,31 @@ class JobEngine:
             dest,
             "--config", str(self.config_path),
             "--transfers", "4",
-            "--progress",
+            "--checkers", "8",
+            "--stats", "1s",
+            "--stats-one-line",
+            "-v",
         ]
 
         self._log(job.id, "progress", f"Uploading to: {dest}")
 
-        # Run in thread pool to not block event loop
+        # Stream progress instead of buffering with capture_output (which deadlocks
+        # on large --progress output).
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
+        result_code, result_output = await loop.run_in_executor(
             None,
-            lambda: subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            lambda: self._run_rclone_with_progress(cmd, on_progress, loop)
         )
 
-        if result.returncode == 0:
+        if result_code == 0:
             # Cleanup old backups if retention is set
             if job.retention_count > 0:
                 await self._cleanup_old_backups_async(job, clean_name)
-            self._log(job.id, "success", f"Backup completed: {dest}", 0, result.stdout)
+            self._log(job.id, "success", f"Backup completed: {dest}", 0, result_output)
             return True, f"Backup completed: {dest}", 0
         else:
-            self._log(job.id, "failed", f"Upload failed: {result.stderr}", result.returncode)
-            return False, result.stderr, result.returncode
+            self._log(job.id, "failed", f"Upload failed: {result_output}", result_code)
+            return False, result_output, result_code
     
     async def _upload_paths(self, job: Job, source_paths: list[str], on_progress=None) -> tuple[bool, str, int]:
         """Upload multiple paths preserving directory structure with date and time in folder name"""
