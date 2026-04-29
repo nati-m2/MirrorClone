@@ -940,38 +940,62 @@ async def execute_restore(request: dict):
         raise HTTPException(status_code=400, detail="backup_path is required")
     if not destination:
         raise HTTPException(status_code=400, detail="destination is required")
-    if not auth_manager.config_path.exists():
-        raise HTTPException(status_code=400, detail="No rclone config found")
-    
+
     dest_path = Path(destination)
-    dest_path.mkdir(parents=True, exist_ok=True)
-    
     loop = asyncio.get_event_loop()
-    
+
     def _do_restore():
-        errors = []
-        
-        # Check if the backup is a ZIP (compressed)
+        import tempfile, zipfile as _zipfile
+
+        dest_path.mkdir(parents=True, exist_ok=True)
+
+        # ── Case 1: backup_path is a local ZIP file ────────────────────────────
+        local_zip_path = Path(backup_path)
+        if local_zip_path.exists() and local_zip_path.is_file() and local_zip_path.suffix == '.zip':
+            if password:
+                # Use 7z for encrypted ZIPs
+                extract_cmd = ["7z", "x", f"-p{password}", f"-o{dest_path}", "-y", str(local_zip_path)]
+                if selected_items:
+                    extract_cmd.extend(selected_items)
+                res = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=600)
+                if res.returncode != 0:
+                    return False, f"Extraction failed (wrong password?): {res.stderr}"
+                return True, f"Restored to {destination}"
+            else:
+                try:
+                    with _zipfile.ZipFile(str(local_zip_path), 'r') as zf:
+                        if selected_items:
+                            for item in selected_items:
+                                for zname in zf.namelist():
+                                    if zname == item or zname.startswith(item.rstrip('/') + '/'):
+                                        zf.extract(zname, str(dest_path))
+                        else:
+                            zf.extractall(str(dest_path))
+                    return True, f"Restored to {destination}"
+                except _zipfile.BadZipFile as e:
+                    return False, f"Bad zip file: {e}"
+
+        # ── Case 2: remote rclone path ─────────────────────────────────────────
+        if not auth_manager.config_path.exists():
+            return False, "No rclone config found"
+
+        # Check if the remote snapshot contains a ZIP inside
         zip_result = subprocess.run(
             ["rclone", "lsjson", backup_path, "--config", str(auth_manager.config_path), "--no-modtime"],
             capture_output=True, text=True, timeout=30
         )
-        
         is_zip_backup = False
         zip_remote_path = None
         if zip_result.returncode == 0 and zip_result.stdout.strip():
-            items = json.loads(zip_result.stdout)
-            zip_files = [i for i in items if not i.get("IsDir") and i["Name"].endswith(".zip")]
+            remote_items = json.loads(zip_result.stdout)
+            zip_files = [i for i in remote_items if not i.get("IsDir") and i["Name"].endswith(".zip")]
             if zip_files:
                 is_zip_backup = True
                 zip_remote_path = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
-        
+
         if is_zip_backup and zip_remote_path:
             # Download ZIP to temp dir then extract
-            import tempfile, shutil
             with tempfile.TemporaryDirectory() as tmpdir:
-                local_zip = str(Path(tmpdir) / "backup.zip")
-                # Download the zip
                 dl = subprocess.run(
                     ["rclone", "copy", zip_remote_path, tmpdir,
                      "--config", str(auth_manager.config_path)],
@@ -979,36 +1003,29 @@ async def execute_restore(request: dict):
                 )
                 if dl.returncode != 0:
                     return False, f"Failed to download backup: {dl.stderr}"
-                
+
                 local_zip = str(next(Path(tmpdir).glob("*.zip")))
-                
-                # Extract ZIP (with or without password)
+
                 if password:
-                    extract_cmd = ["7z", "x", f"-p{password}", "-o" + str(dest_path),
-                                   "-y", local_zip]
+                    extract_cmd = ["7z", "x", f"-p{password}", f"-o{dest_path}", "-y", local_zip]
                     if selected_items:
                         extract_cmd.extend(selected_items)
-                else:
-                    import zipfile
-                    try:
-                        with zipfile.ZipFile(local_zip, 'r') as zf:
-                            if selected_items:
-                                for item in selected_items:
-                                    # Extract matching files
-                                    for zname in zf.namelist():
-                                        if zname.startswith(item):
-                                            zf.extract(zname, str(dest_path))
-                            else:
-                                zf.extractall(str(dest_path))
-                        return True, f"Restored to {destination}"
-                    except zipfile.BadZipFile as e:
-                        return False, f"Bad zip file: {e}"
-                
-                if password:
                     res = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=600)
                     if res.returncode != 0:
                         return False, f"Extraction failed (wrong password?): {res.stderr}"
-                
+                else:
+                    try:
+                        with _zipfile.ZipFile(local_zip, 'r') as zf:
+                            if selected_items:
+                                for item in selected_items:
+                                    for zname in zf.namelist():
+                                        if zname == item or zname.startswith(item.rstrip('/') + '/'):
+                                            zf.extract(zname, str(dest_path))
+                            else:
+                                zf.extractall(str(dest_path))
+                    except _zipfile.BadZipFile as e:
+                        return False, f"Bad zip file: {e}"
+
                 return True, f"Restored to {destination}"
         else:
             # Direct rclone copy from remote
