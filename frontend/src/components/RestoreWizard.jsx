@@ -343,7 +343,15 @@ const StepRestoreSettings = ({ snapshot, onNext, onBack }) => {
       .catch(() => {})
   }, [])
 
-  const finalDest = destMode === 'original' ? snapshot.path.split(':').slice(-1)[0] || '/data' : customDest
+  const getOriginalDest = () => {
+    if (snapshot.source === 'local') {
+      // For local ZIPs, restore to /data (can't write back into /backups source)
+      return '/data'
+    }
+    // For remote snapshots, strip remote prefix (e.g. "gdrive:MirrorCloneBackups/job/snap" → "/data")
+    return '/data'
+  }
+  const finalDest = destMode === 'original' ? getOriginalDest() : customDest
 
   const canProceed = finalDest.trim().length > 0 && (!snapshot.encrypted || password.length > 0)
 
@@ -357,8 +365,8 @@ const StepRestoreSettings = ({ snapshot, onNext, onBack }) => {
             <input type="radio" checked={destMode === 'original'} onChange={() => setDestMode('original')}
               className="accent-primary mt-0.5" />
             <div>
-              <div className="font-medium text-sm">Original location</div>
-              <div className="text-xs text-muted-foreground mt-0.5">Restore into the original backup directory</div>
+              <div className="font-medium text-sm">Default location</div>
+              <div className="text-xs text-muted-foreground mt-0.5">Restore into <span className="font-mono">/data</span></div>
             </div>
           </label>
 
