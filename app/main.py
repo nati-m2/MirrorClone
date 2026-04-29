@@ -645,7 +645,7 @@ async def list_restore_backups():
                         job.destination.rstrip('/'),
                         "--config", str(auth_manager.config_path),
                         "--dirs-only",
-                        "-R", "--max-depth", "1"
+                        "--max-depth", "1"
                     ],
                     capture_output=True,
                     text=True,
@@ -742,12 +742,14 @@ async def list_restore_backups():
         # Merge local snapshots into results
         for job_name_raw, snaps in local_by_job.items():
             snaps.sort(key=lambda x: x["timestamp"], reverse=True)
-            # Check if already in results (remote job with same name)
+            # Check if already in results (remote job with same name or matched by job_id)
             existing = next((r for r in results if r["job_name"] == job_name_raw or
                              any(s.get("job_id") == snaps[0].get("job_id") for s in snaps if snaps[0].get("job_id"))), None)
             if existing:
-                # Add local snapshots alongside remote ones
-                existing["snapshots"].extend(snaps)
+                # De-duplicate by timestamp (minute precision) - prefer remote over local
+                existing_ts = {s["timestamp"][:16] for s in existing["snapshots"]}
+                new_snaps = [s for s in snaps if s["timestamp"][:16] not in existing_ts]
+                existing["snapshots"].extend(new_snaps)
                 existing["snapshots"].sort(key=lambda x: x["timestamp"], reverse=True)
             else:
                 results.append({
@@ -756,6 +758,19 @@ async def list_restore_backups():
                     "destination": "/backups (local)",
                     "snapshots": snaps
                 })
+
+    # ── Final safeguard: dedupe snapshots within each job by timestamp+source ──
+    for r in results:
+        seen = set()
+        unique = []
+        for s in r["snapshots"]:
+            # Key: timestamp (minute precision) - ignore seconds to catch near-duplicates
+            key = s["timestamp"][:16]
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(s)
+        r["snapshots"] = unique
 
     # ── Source 3: Scan remote MirrorCloneBackups root (for fresh container) ──────
     # Only if we still have no results and have rclone config
