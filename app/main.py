@@ -1119,8 +1119,14 @@ if frontend_path.exists():
     
     @app.get("/{full_path:path}")
     async def serve_frontend_routes(full_path: str):
-        if not full_path.startswith("api/"):
-            return FileResponse(frontend_path / "index.html")
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        # Serve the actual static file if it exists (e.g. logo.svg, favicon.ico)
+        candidate = frontend_path / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        # SPA fallback to index.html for client-side routing
+        return FileResponse(frontend_path / "index.html")
 
 
 if __name__ == "__main__":
