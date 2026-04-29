@@ -10,8 +10,7 @@ services:
     volumes:
       - ./mirrorclone/config:/config
       - ./mirrorclone/backups:/backups
-      #- /srv/link_appdata:/data:ro
-      - D:\test:/data
+      - /srv/link_appdata:/data:ro
 
     environment:
 #      - GOOGLE_CLIENT_ID=your-client-id
