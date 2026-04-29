@@ -20,7 +20,7 @@ class Job(BaseModel):
     enabled: bool = Field(default=True, description="Whether the job is enabled")
     preserve_metadata: bool = Field(default=True, description="Preserve file metadata and permissions")
     preserve_links: bool = Field(default=True, description="Preserve symbolic links")
-    compress_before_upload: bool = Field(default=False, description="Create ZIP archive before upload")
+    compress_before_upload: bool = Field(default=True, description="Create ZIP archive before upload (default: True)")
     zip_password: Optional[str] = Field(default=None, description="Password for ZIP encryption")
     retention_count: int = Field(default=0, description="Keep only X latest remote backups (0 = keep all)")
     local_retention_count: int = Field(default=0, description="Keep only X latest local ZIP backups in /backups (0 = keep all)")
@@ -41,7 +41,7 @@ class JobCreate(BaseModel):
     enabled: bool = True
     preserve_metadata: bool = True
     preserve_links: bool = True
-    compress_before_upload: bool = False
+    compress_before_upload: bool = True
     zip_password: Optional[str] = None
     retention_count: int = 0
     local_retention_count: int = 0
