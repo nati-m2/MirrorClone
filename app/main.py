@@ -636,58 +636,64 @@ async def list_restore_backups():
     seen_job_names = set()
 
     # ── Source 1: Remote destinations from known Jobs ──────────────────────────
+    # Run all `rclone lsf` calls in PARALLEL to avoid sequential cloud round-trips.
     if has_config:
+        loop = asyncio.get_event_loop()
+
+        def _lsf(dest: str):
+            return subprocess.run(
+                ["rclone", "lsf", dest.rstrip('/'),
+                 "--config", str(auth_manager.config_path),
+                 "--dirs-only", "--max-depth", "1"],
+                capture_output=True, text=True, timeout=30
+            )
+
         for job in jobs:
             seen_job_names.add(job.name)
-            try:
-                result = subprocess.run(
-                    [
-                        "rclone", "lsf",
-                        job.destination.rstrip('/'),
-                        "--config", str(auth_manager.config_path),
-                        "--dirs-only",
-                        "--max-depth", "1"
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                snapshots = []
-                if result.returncode == 0:
-                    for line in result.stdout.strip().split('\n'):
-                        folder = line.strip().rstrip('/')
-                        if not folder:
-                            continue
-                        # Match: JobName-DD.MM.YYYY-HH:MM:SS
-                        match = re.match(
-                            rf"^{re.escape(''.join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name))}"
-                            r"-(\d{2})\.(\d{2})\.(\d{4})-(\d{2}):(\d{2}):(\d{2})$",
-                            folder
-                        )
-                        if match:
-                            day, month, year, hour, minute, second = match.groups()
-                            snapshots.append({
-                                "folder": folder,
-                                "path": f"{job.destination.rstrip('/')}/{folder}",
-                                "timestamp": f"{year}-{month}-{day}T{hour}:{minute}:{second}",
-                                "display": f"{day}/{month}/{year} {hour}:{minute}:{second}",
-                                "encrypted": bool(job.zip_password),
-                                "compressed": job.compress_before_upload,
-                                "job_id": job.id,
-                                "job_name": job.name,
-                                "source": "remote"
-                            })
-                snapshots.sort(key=lambda x: x["timestamp"], reverse=True)
-                if snapshots:
-                    results.append({
-                        "job_id": job.id,
-                        "job_name": job.name,
-                        "destination": job.destination,
-                        "snapshots": snapshots
-                    })
-            except Exception as e:
-                print(f"Error listing remote backups for {job.name}: {e}")
+
+        # Kick off all listings concurrently
+        listings = await asyncio.gather(
+            *[loop.run_in_executor(None, lambda d=j.destination: _lsf(d)) for j in jobs],
+            return_exceptions=True,
+        )
+
+        for job, result in zip(jobs, listings):
+            if isinstance(result, Exception):
+                print(f"Error listing remote backups for {job.name}: {result}")
                 continue
+            snapshots = []
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    folder = line.strip().rstrip('/')
+                    if not folder:
+                        continue
+                    # Match: JobName-DD.MM.YYYY-HH:MM:SS
+                    match = re.match(
+                        rf"^{re.escape(''.join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name))}"
+                        r"-(\d{2})\.(\d{2})\.(\d{4})-(\d{2}):(\d{2}):(\d{2})$",
+                        folder
+                    )
+                    if match:
+                        day, month, year, hour, minute, second = match.groups()
+                        snapshots.append({
+                            "folder": folder,
+                            "path": f"{job.destination.rstrip('/')}/{folder}",
+                            "timestamp": f"{year}-{month}-{day}T{hour}:{minute}:{second}",
+                            "display": f"{day}/{month}/{year} {hour}:{minute}:{second}",
+                            "encrypted": bool(job.zip_password),
+                            "compressed": job.compress_before_upload,
+                            "job_id": job.id,
+                            "job_name": job.name,
+                            "source": "remote"
+                        })
+            snapshots.sort(key=lambda x: x["timestamp"], reverse=True)
+            if snapshots:
+                results.append({
+                    "job_id": job.id,
+                    "job_name": job.name,
+                    "destination": job.destination,
+                    "snapshots": snapshots
+                })
 
     # ── Source 2: Local /backups directory (ZIP files) ─────────────────────────
     backups_dir = Path("/backups")
@@ -786,17 +792,31 @@ async def list_restore_backups():
             )
             if r.returncode == 0:
                 EXCLUDED = {"mirrorclone-config", "mirrorclone-config/"}
+                job_dirs = []
                 for line in r.stdout.strip().split('\n'):
                     job_dir = line.strip().rstrip('/')
                     if not job_dir or job_dir in EXCLUDED:
                         continue
+                    job_dirs.append(job_dir)
+
+                # Parallelize per-job-dir snapshot listings
+                loop3 = asyncio.get_event_loop()
+                snap_listings = await asyncio.gather(
+                    *[loop3.run_in_executor(
+                        None,
+                        lambda d=f"{root_path}/{jd}": subprocess.run(
+                            ["rclone", "lsf", d, "--config", str(auth_manager.config_path),
+                             "--dirs-only", "--max-depth", "1"],
+                            capture_output=True, text=True, timeout=30
+                        )
+                    ) for jd in job_dirs],
+                    return_exceptions=True,
+                )
+
+                for job_dir, r2 in zip(job_dirs, snap_listings):
+                    if isinstance(r2, Exception):
+                        continue
                     job_dest = f"{root_path}/{job_dir}"
-                    # List snapshot folders inside this job dir
-                    r2 = subprocess.run(
-                        ["rclone", "lsf", job_dest, "--config", str(auth_manager.config_path),
-                         "--dirs-only", "--max-depth", "1"],
-                        capture_output=True, text=True, timeout=30
-                    )
                     snapshots = []
                     if r2.returncode == 0:
                         snap_pattern = re.compile(
