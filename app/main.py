@@ -1,9 +1,10 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import datetime
 import asyncio
 import json
 
@@ -605,6 +606,490 @@ async def test_notifications():
     """Test notification system"""
     success, message = guardian.test_notifications()
     return {"success": success, "message": message}
+
+
+@app.get("/api/restore/backups")
+async def list_restore_backups():
+    """List all available backup snapshots.
+    Sources:
+      1. Remote destinations from configured Jobs
+      2. Local /backups directory (ZIP files created by Jobs)
+      3. If no jobs exist, attempt to restore jobs.json from self-backup first
+    """
+    import subprocess
+    import re
+    import os
+
+    has_config = auth_manager.config_path.exists()
+    jobs = job_manager.get_all_jobs()
+
+    # If no jobs and config exists, try to pull jobs.json from self-backup cloud copy
+    if not jobs and has_config:
+        try:
+            await self_backup.restore_config()
+            jobs = job_manager.get_all_jobs()
+        except Exception:
+            pass
+
+    results = []
+    seen_job_names = set()
+
+    # ── Source 1: Remote destinations from known Jobs ──────────────────────────
+    if has_config:
+        for job in jobs:
+            seen_job_names.add(job.name)
+            try:
+                result = subprocess.run(
+                    [
+                        "rclone", "lsf",
+                        job.destination.rstrip('/'),
+                        "--config", str(auth_manager.config_path),
+                        "--dirs-only",
+                        "-R", "--max-depth", "1"
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                snapshots = []
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        folder = line.strip().rstrip('/')
+                        if not folder:
+                            continue
+                        # Match: JobName-DD.MM.YYYY-HH:MM:SS
+                        match = re.match(
+                            rf"^{re.escape(''.join(c if c.isalnum() or c in '-_ ' else '_' for c in job.name))}"
+                            r"-(\d{2})\.(\d{2})\.(\d{4})-(\d{2}):(\d{2}):(\d{2})$",
+                            folder
+                        )
+                        if match:
+                            day, month, year, hour, minute, second = match.groups()
+                            snapshots.append({
+                                "folder": folder,
+                                "path": f"{job.destination.rstrip('/')}/{folder}",
+                                "timestamp": f"{year}-{month}-{day}T{hour}:{minute}:{second}",
+                                "display": f"{day}/{month}/{year} {hour}:{minute}:{second}",
+                                "encrypted": bool(job.zip_password),
+                                "compressed": job.compress_before_upload,
+                                "job_id": job.id,
+                                "job_name": job.name,
+                                "source": "remote"
+                            })
+                snapshots.sort(key=lambda x: x["timestamp"], reverse=True)
+                if snapshots:
+                    results.append({
+                        "job_id": job.id,
+                        "job_name": job.name,
+                        "destination": job.destination,
+                        "snapshots": snapshots
+                    })
+            except Exception as e:
+                print(f"Error listing remote backups for {job.name}: {e}")
+                continue
+
+    # ── Source 2: Local /backups directory (ZIP files) ─────────────────────────
+    backups_dir = Path("/backups")
+    if backups_dir.exists():
+        # Pattern: JobName_YYYYMMDD_HHMMSS.zip
+        local_pattern = re.compile(r"^(.+)_(\d{8})_(\d{6})\.zip$")
+        local_by_job: dict[str, list] = {}
+
+        try:
+            for f in sorted(backups_dir.iterdir()):
+                if not f.is_file() or f.suffix != '.zip':
+                    continue
+                m = local_pattern.match(f.name)
+                if not m:
+                    continue
+                job_name_raw, date_str, time_str = m.groups()
+                # Restore display name (underscores → spaces for display)
+                try:
+                    dt = datetime.strptime(date_str + time_str, "%Y%m%d%H%M%S")
+                    ts = dt.strftime("%Y-%m-%dT%H:%M:%S")
+                    display = dt.strftime("%d/%m/%Y %H:%M:%S")
+                except ValueError:
+                    continue
+
+                stat = f.stat()
+                size_mb = round(stat.st_size / (1024 * 1024), 1)
+
+                snap = {
+                    "folder": f.name,
+                    "path": str(f),
+                    "timestamp": ts,
+                    "display": display,
+                    "encrypted": False,
+                    "compressed": True,
+                    "job_name": job_name_raw,
+                    "job_id": None,
+                    "size_mb": size_mb,
+                    "source": "local"
+                }
+
+                # Try to match with a known job
+                for job in jobs:
+                    clean = "".join(c if c.isalnum() or c in '-_' else '_' for c in job.name)
+                    if job_name_raw == clean:
+                        snap["job_id"] = job.id
+                        snap["encrypted"] = bool(job.zip_password)
+                        break
+
+                local_by_job.setdefault(job_name_raw, []).append(snap)
+        except Exception as e:
+            print(f"Error scanning /backups: {e}")
+
+        # Merge local snapshots into results
+        for job_name_raw, snaps in local_by_job.items():
+            snaps.sort(key=lambda x: x["timestamp"], reverse=True)
+            # Check if already in results (remote job with same name)
+            existing = next((r for r in results if r["job_name"] == job_name_raw or
+                             any(s.get("job_id") == snaps[0].get("job_id") for s in snaps if snaps[0].get("job_id"))), None)
+            if existing:
+                # Add local snapshots alongside remote ones
+                existing["snapshots"].extend(snaps)
+                existing["snapshots"].sort(key=lambda x: x["timestamp"], reverse=True)
+            else:
+                results.append({
+                    "job_id": snaps[0].get("job_id"),
+                    "job_name": job_name_raw,
+                    "destination": "/backups (local)",
+                    "snapshots": snaps
+                })
+
+    # ── Source 3: Scan remote MirrorCloneBackups root (for fresh container) ──────
+    # Only if we still have no results and have rclone config
+    if has_config and not results:
+        try:
+            # Detect remote name from self_backup or rclone config
+            remote_name = self_backup.remote_name  # e.g. "gdrive"
+            root_path = f"{remote_name}:MirrorCloneBackups"
+
+            # List top-level dirs in root
+            r = subprocess.run(
+                ["rclone", "lsf", root_path, "--config", str(auth_manager.config_path),
+                 "--dirs-only", "--max-depth", "1"],
+                capture_output=True, text=True, timeout=30
+            )
+            if r.returncode == 0:
+                EXCLUDED = {"mirrorclone-config", "mirrorclone-config/"}
+                for line in r.stdout.strip().split('\n'):
+                    job_dir = line.strip().rstrip('/')
+                    if not job_dir or job_dir in EXCLUDED:
+                        continue
+                    job_dest = f"{root_path}/{job_dir}"
+                    # List snapshot folders inside this job dir
+                    r2 = subprocess.run(
+                        ["rclone", "lsf", job_dest, "--config", str(auth_manager.config_path),
+                         "--dirs-only", "--max-depth", "1"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    snapshots = []
+                    if r2.returncode == 0:
+                        snap_pattern = re.compile(
+                            r"^(.+)-(\d{2})\.(\d{2})\.(\d{4})-(\d{2}):(\d{2}):(\d{2})/?$"
+                        )
+                        for snap_line in r2.stdout.strip().split('\n'):
+                            folder = snap_line.strip().rstrip('/')
+                            if not folder:
+                                continue
+                            m = snap_pattern.match(folder)
+                            if not m:
+                                continue
+                            _, day, month, year, hour, minute, second = m.groups()
+                            snapshots.append({
+                                "folder": folder,
+                                "path": f"{job_dest}/{folder}",
+                                "timestamp": f"{year}-{month}-{day}T{hour}:{minute}:{second}",
+                                "display": f"{day}/{month}/{year} {hour}:{minute}:{second}",
+                                "encrypted": False,
+                                "compressed": False,
+                                "job_id": None,
+                                "job_name": job_dir,
+                                "source": "remote_scan"
+                            })
+                    snapshots.sort(key=lambda x: x["timestamp"], reverse=True)
+                    if snapshots:
+                        results.append({
+                            "job_id": None,
+                            "job_name": job_dir,
+                            "destination": job_dest,
+                            "snapshots": snapshots
+                        })
+        except Exception as e:
+            print(f"Error scanning remote root: {e}")
+
+    return {"jobs": results, "config_available": has_config}
+
+
+@app.get("/api/restore/browse")
+async def browse_backup(backup_path: str, sub_path: str = ""):
+    """Browse files inside a backup snapshot (remote via rclone or local ZIP)"""
+    import subprocess
+    import zipfile as _zipfile
+
+    # ── Local ZIP file ─────────────────────────────────────────────────────────
+    local_path = Path(backup_path)
+    if local_path.exists() and local_path.is_file() and local_path.suffix == '.zip':
+        try:
+            with _zipfile.ZipFile(str(local_path), 'r') as zf:
+                prefix = sub_path.rstrip('/') + '/' if sub_path else ''
+                seen_dirs = set()
+                items = []
+                for name in zf.namelist():
+                    if not name.startswith(prefix):
+                        continue
+                    rest = name[len(prefix):]
+                    if not rest or rest == '/':
+                        continue
+                    parts = rest.split('/')
+                    # Direct child
+                    child_name = parts[0]
+                    if not child_name:
+                        continue
+                    is_dir = len(parts) > 1
+                    child_path = (prefix + child_name).lstrip('/')
+                    if is_dir:
+                        if child_name not in seen_dirs:
+                            seen_dirs.add(child_name)
+                            items.append({
+                                "name": child_name,
+                                "path": child_path,
+                                "type": "directory",
+                                "size": 0
+                            })
+                    else:
+                        info = zf.getinfo(name)
+                        items.append({
+                            "name": child_name,
+                            "path": child_path,
+                            "type": "file",
+                            "size": info.file_size
+                        })
+                items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
+                return {
+                    "backup_path": backup_path,
+                    "sub_path": sub_path,
+                    "parent_sub_path": str(Path(sub_path).parent) if sub_path and sub_path != "." else None,
+                    "items": items,
+                    "source": "local"
+                }
+        except _zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail="Invalid or encrypted ZIP (cannot browse without extraction)")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Remote via rclone ──────────────────────────────────────────────────────
+    if not auth_manager.config_path.exists():
+        raise HTTPException(status_code=400, detail="No rclone config found")
+
+    full_path = f"{backup_path.rstrip('/')}/{sub_path}".rstrip('/')
+
+    try:
+        result = subprocess.run(
+            [
+                "rclone", "lsjson",
+                full_path,
+                "--config", str(auth_manager.config_path),
+                "--no-modtime",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=result.stderr)
+
+        raw = json.loads(result.stdout) if result.stdout.strip() else []
+        items = []
+        for item in raw:
+            items.append({
+                "name": item.get("Name", ""),
+                "path": f"{sub_path}/{item['Name']}".lstrip('/') if sub_path else item["Name"],
+                "type": "directory" if item.get("IsDir") else "file",
+                "size": item.get("Size", 0)
+            })
+        items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
+        return {
+            "backup_path": backup_path,
+            "sub_path": sub_path,
+            "parent_sub_path": str(Path(sub_path).parent) if sub_path and sub_path != "." else None,
+            "items": items,
+            "source": "remote"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/restore/execute")
+async def execute_restore(request: dict):
+    """Execute a restore operation"""
+    import subprocess
+    import os
+    
+    backup_path = request.get("backup_path", "").strip()
+    selected_items = request.get("selected_items", [])  # list of relative paths inside backup
+    destination = request.get("destination", "").strip()
+    password = request.get("password", "")
+    restore_permissions = request.get("restore_permissions", False)
+    
+    if not backup_path:
+        raise HTTPException(status_code=400, detail="backup_path is required")
+    if not destination:
+        raise HTTPException(status_code=400, detail="destination is required")
+    if not auth_manager.config_path.exists():
+        raise HTTPException(status_code=400, detail="No rclone config found")
+    
+    dest_path = Path(destination)
+    dest_path.mkdir(parents=True, exist_ok=True)
+    
+    loop = asyncio.get_event_loop()
+    
+    def _do_restore():
+        errors = []
+        
+        # Check if the backup is a ZIP (compressed)
+        zip_result = subprocess.run(
+            ["rclone", "lsjson", backup_path, "--config", str(auth_manager.config_path), "--no-modtime"],
+            capture_output=True, text=True, timeout=30
+        )
+        
+        is_zip_backup = False
+        zip_remote_path = None
+        if zip_result.returncode == 0 and zip_result.stdout.strip():
+            items = json.loads(zip_result.stdout)
+            zip_files = [i for i in items if not i.get("IsDir") and i["Name"].endswith(".zip")]
+            if zip_files:
+                is_zip_backup = True
+                zip_remote_path = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
+        
+        if is_zip_backup and zip_remote_path:
+            # Download ZIP to temp dir then extract
+            import tempfile, shutil
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_zip = str(Path(tmpdir) / "backup.zip")
+                # Download the zip
+                dl = subprocess.run(
+                    ["rclone", "copy", zip_remote_path, tmpdir,
+                     "--config", str(auth_manager.config_path)],
+                    capture_output=True, text=True, timeout=600
+                )
+                if dl.returncode != 0:
+                    return False, f"Failed to download backup: {dl.stderr}"
+                
+                local_zip = str(next(Path(tmpdir).glob("*.zip")))
+                
+                # Extract ZIP (with or without password)
+                if password:
+                    extract_cmd = ["7z", "x", f"-p{password}", "-o" + str(dest_path),
+                                   "-y", local_zip]
+                    if selected_items:
+                        extract_cmd.extend(selected_items)
+                else:
+                    import zipfile
+                    try:
+                        with zipfile.ZipFile(local_zip, 'r') as zf:
+                            if selected_items:
+                                for item in selected_items:
+                                    # Extract matching files
+                                    for zname in zf.namelist():
+                                        if zname.startswith(item):
+                                            zf.extract(zname, str(dest_path))
+                            else:
+                                zf.extractall(str(dest_path))
+                        return True, f"Restored to {destination}"
+                    except zipfile.BadZipFile as e:
+                        return False, f"Bad zip file: {e}"
+                
+                if password:
+                    res = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=600)
+                    if res.returncode != 0:
+                        return False, f"Extraction failed (wrong password?): {res.stderr}"
+                
+                return True, f"Restored to {destination}"
+        else:
+            # Direct rclone copy from remote
+            if selected_items:
+                import tempfile
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                    f.write('\n'.join(selected_items))
+                    files_from = f.name
+                
+                try:
+                    cmd = [
+                        "rclone", "copy",
+                        backup_path,
+                        destination,
+                        "--config", str(auth_manager.config_path),
+                        "--files-from", files_from,
+                        "--transfers", "4",
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+                finally:
+                    Path(files_from).unlink(missing_ok=True)
+            else:
+                cmd = [
+                    "rclone", "copy",
+                    backup_path,
+                    destination,
+                    "--config", str(auth_manager.config_path),
+                    "--transfers", "4",
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+            
+            if res.returncode != 0:
+                return False, f"Restore failed: {res.stderr}"
+            
+            # Restore permissions if requested (Linux/Mac only)
+            if restore_permissions and os.name != 'nt':
+                try:
+                    for root, dirs, files in os.walk(destination):
+                        for fname in files:
+                            fpath = os.path.join(root, fname)
+                            os.chmod(fpath, 0o644)
+                        for dname in dirs:
+                            os.chmod(os.path.join(root, dname), 0o755)
+                except Exception as e:
+                    print(f"Permission restore warning: {e}")
+            
+            return True, f"Restored {len(selected_items) if selected_items else 'all'} item(s) to {destination}"
+    
+    try:
+        success, message = await loop.run_in_executor(None, _do_restore)
+        if success:
+            return {"success": True, "message": message}
+        else:
+            raise HTTPException(status_code=500, detail=message)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/restore/destinations")
+async def list_restore_destinations():
+    """List possible restore destinations inside /data"""
+    import os
+    
+    destinations = []
+    data_path = Path("/data")
+    
+    if data_path.exists():
+        try:
+            for item in sorted(data_path.iterdir()):
+                if item.is_dir() and not item.name.startswith('.'):
+                    destinations.append({
+                        "name": item.name,
+                        "path": str(item),
+                        "type": "directory"
+                    })
+        except Exception as e:
+            print(f"Error listing destinations: {e}")
+    
+    return {"destinations": destinations, "data_root": "/data"}
 
 
 frontend_path = Path(__file__).parent.parent / "frontend" / "dist"
