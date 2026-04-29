@@ -923,8 +923,9 @@ class _RcloneRemoteFile:
         if self._size is None:
             res = self._sub.run(
                 ["rclone", "lsjson", self.remote_path,
-                 "--config", str(self.config_path), "--no-modtime"],
-                capture_output=True, text=True, timeout=30
+                 "--config", str(self.config_path),
+                 "--no-modtime", "--no-mimetype"],
+                capture_output=True, text=True, timeout=120
             )
             if res.returncode != 0:
                 raise IOError(f"rclone lsjson failed: {res.stderr}")
@@ -1205,8 +1206,10 @@ async def browse_backup(backup_path: str, sub_path: str = ""):
                 "rclone", "lsjson", remote_path,
                 "--config", str(auth_manager.config_path),
                 "--no-modtime",
+                "--no-mimetype",
+                "--fast-list",
             ],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=120
         )
         return res
 
