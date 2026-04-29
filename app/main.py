@@ -834,82 +834,156 @@ async def list_restore_backups():
     return {"jobs": results, "config_available": has_config}
 
 
-@app.get("/api/restore/browse")
-async def browse_backup(backup_path: str, sub_path: str = ""):
-    """Browse files inside a backup snapshot (remote via rclone or local ZIP)"""
-    import subprocess
+def _browse_local_zip(zip_path: Path, backup_path: str, sub_path: str, source_label: str = "local"):
+    """Helper: list entries inside a local ZIP at the given sub_path."""
     import zipfile as _zipfile
-
-    # ── Local ZIP file ─────────────────────────────────────────────────────────
-    local_path = Path(backup_path)
-    if local_path.exists() and local_path.is_file() and local_path.suffix == '.zip':
-        try:
-            with _zipfile.ZipFile(str(local_path), 'r') as zf:
-                prefix = sub_path.rstrip('/') + '/' if sub_path else ''
-                seen_dirs = set()
-                items = []
-                for name in zf.namelist():
-                    if not name.startswith(prefix):
-                        continue
-                    rest = name[len(prefix):]
-                    if not rest or rest == '/':
-                        continue
-                    parts = rest.split('/')
-                    # Direct child
-                    child_name = parts[0]
-                    if not child_name:
-                        continue
-                    is_dir = len(parts) > 1
-                    child_path = (prefix + child_name).lstrip('/')
-                    if is_dir:
-                        if child_name not in seen_dirs:
-                            seen_dirs.add(child_name)
-                            items.append({
-                                "name": child_name,
-                                "path": child_path,
-                                "type": "directory",
-                                "size": 0
-                            })
-                    else:
-                        info = zf.getinfo(name)
+    try:
+        with _zipfile.ZipFile(str(zip_path), 'r') as zf:
+            prefix = sub_path.rstrip('/') + '/' if sub_path else ''
+            seen_dirs = set()
+            items = []
+            for name in zf.namelist():
+                if not name.startswith(prefix):
+                    continue
+                rest = name[len(prefix):]
+                if not rest or rest == '/':
+                    continue
+                parts = rest.split('/')
+                child_name = parts[0]
+                if not child_name:
+                    continue
+                is_dir = len(parts) > 1
+                child_path = (prefix + child_name).lstrip('/')
+                if is_dir:
+                    if child_name not in seen_dirs:
+                        seen_dirs.add(child_name)
                         items.append({
                             "name": child_name,
                             "path": child_path,
-                            "type": "file",
-                            "size": info.file_size
+                            "type": "directory",
+                            "size": 0
                         })
-                items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
-                return {
-                    "backup_path": backup_path,
-                    "sub_path": sub_path,
-                    "parent_sub_path": str(Path(sub_path).parent) if sub_path and sub_path != "." else None,
-                    "items": items,
-                    "source": "local"
-                }
-        except _zipfile.BadZipFile:
-            raise HTTPException(status_code=400, detail="Invalid or encrypted ZIP (cannot browse without extraction)")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+                else:
+                    info = zf.getinfo(name)
+                    items.append({
+                        "name": child_name,
+                        "path": child_path,
+                        "type": "file",
+                        "size": info.file_size
+                    })
+            items.sort(key=lambda x: (0 if x["type"] == "directory" else 1, x["name"]))
+            return {
+                "backup_path": backup_path,
+                "sub_path": sub_path,
+                "parent_sub_path": str(Path(sub_path).parent) if sub_path and sub_path != "." else None,
+                "items": items,
+                "source": source_label,
+                "is_zip": True,
+            }
+    except _zipfile.BadZipFile:
+        raise HTTPException(status_code=400, detail="Invalid or encrypted ZIP (cannot browse without extraction)")
+
+
+def _ensure_remote_zip_cached(remote_zip_path: str) -> Path:
+    """Download a remote ZIP to a local cache directory (idempotent) and return its local path."""
+    import hashlib
+    import subprocess as _sub
+    cache_root = Path("/tmp/mirrorclone_zip_cache")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    # Use a stable hash of the remote path as cache key
+    h = hashlib.sha1(remote_zip_path.encode('utf-8')).hexdigest()[:16]
+    zip_name = Path(remote_zip_path).name
+    local_zip = cache_root / f"{h}_{zip_name}"
+    if local_zip.exists() and local_zip.stat().st_size > 0:
+        return local_zip
+
+    # Download via rclone copyto for exact filename
+    cmd = [
+        "rclone", "copyto", remote_zip_path, str(local_zip),
+        "--config", str(auth_manager.config_path),
+    ]
+    res = _sub.run(cmd, capture_output=True, text=True, timeout=1800)
+    if res.returncode != 0 or not local_zip.exists():
+        raise HTTPException(status_code=500, detail=f"Failed to fetch remote ZIP for browsing: {res.stderr}")
+    return local_zip
+
+
+@app.get("/api/restore/browse")
+async def browse_backup(backup_path: str, sub_path: str = ""):
+    """Browse files inside a backup snapshot.
+
+    Supported sources:
+      • Local ZIP file (path on disk ending in .zip)
+      • Remote folder via rclone — if the folder contains a single ZIP, the ZIP
+        is auto-downloaded to a cache dir and browsed transparently.
+      • Remote folder with raw files — listed directly via rclone.
+    """
+    import subprocess
+    import zipfile as _zipfile
+
+    # ── Local ZIP file (direct path on disk) ──────────────────────────────────
+    local_path = Path(backup_path)
+    if local_path.exists() and local_path.is_file() and local_path.suffix == '.zip':
+        return _browse_local_zip(local_path, backup_path, sub_path, source_label="local")
 
     # ── Remote via rclone ──────────────────────────────────────────────────────
     if not auth_manager.config_path.exists():
         raise HTTPException(status_code=400, detail="No rclone config found")
 
-    full_path = f"{backup_path.rstrip('/')}/{sub_path}".rstrip('/')
+    loop = asyncio.get_event_loop()
 
-    try:
-        result = subprocess.run(
+    def _list_remote(remote_path: str):
+        res = subprocess.run(
             [
-                "rclone", "lsjson",
-                full_path,
+                "rclone", "lsjson", remote_path,
                 "--config", str(auth_manager.config_path),
                 "--no-modtime",
             ],
-            capture_output=True,
-            text=True,
-            timeout=30
+            capture_output=True, text=True, timeout=30
         )
+        return res
 
+    # When at top level (no sub_path), peek inside the snapshot folder. If it
+    # contains exactly one ZIP, transparently dive into it.
+    if not sub_path:
+        try:
+            top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
+            if top.returncode == 0 and top.stdout.strip():
+                top_items = json.loads(top.stdout)
+                zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
+                non_zip = [i for i in top_items if i not in zip_files]
+                if len(zip_files) == 1 and not non_zip:
+                    remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
+                    cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
+                    return _browse_local_zip(cached_zip, backup_path, "", source_label="remote_zip")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"browse_backup: top-level peek failed: {e}")
+
+    # If the user is already navigating inside a ZIP cached locally, keep using it.
+    # We detect this by checking whether a cached ZIP exists for this backup_path.
+    try:
+        # Try to find a cached ZIP for this backup_path (any zip file under it)
+        # by re-running the top-level listing once (cheap) – we pick the first .zip.
+        if sub_path:
+            top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
+            if top.returncode == 0 and top.stdout.strip():
+                top_items = json.loads(top.stdout)
+                zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
+                if len(zip_files) == 1:
+                    remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
+                    cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
+                    return _browse_local_zip(cached_zip, backup_path, sub_path, source_label="remote_zip")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"browse_backup: cached-zip path failed: {e}")
+
+    # ── Plain remote folder listing (no ZIP, or multiple files) ───────────────
+    full_path = f"{backup_path.rstrip('/')}/{sub_path}".rstrip('/')
+    try:
+        result = await loop.run_in_executor(None, lambda: _list_remote(full_path))
         if result.returncode != 0:
             raise HTTPException(status_code=500, detail=result.stderr)
 
