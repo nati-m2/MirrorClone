@@ -167,37 +167,53 @@ async def get_status() -> SystemStatus:
     )
 
 
+# Cache Google Drive status to avoid hammering the API on every page load.
+_GDRIVE_STATUS_CACHE: dict = {"value": None, "ts": 0.0}
+_GDRIVE_STATUS_TTL = 30.0  # seconds
+
+
 @app.get("/api/gdrive/status")
 async def get_gdrive_status():
-    """Check Google Drive connection status"""
+    """Check Google Drive connection status (cached, off-loop)."""
     import subprocess
-    
+    import time as _time
+
     if not auth_manager.config_path.exists():
         return {"connected": False, "error": "No config file"}
-    
-    try:
-        result = subprocess.run(
-            ["rclone", "about", "gdrive:", "--config", str(auth_manager.config_path)],
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
-        
-        if result.returncode == 0:
-            # Parse storage info
-            lines = result.stdout.strip().split('\n')
-            info = {}
-            for line in lines:
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    info[key.strip().lower().replace(' ', '_')] = value.strip()
-            return {"connected": True, "info": info}
-        else:
+
+    # Serve from short-lived cache to keep the UI snappy
+    now = _time.time()
+    cached = _GDRIVE_STATUS_CACHE["value"]
+    if cached is not None and (now - _GDRIVE_STATUS_CACHE["ts"]) < _GDRIVE_STATUS_TTL:
+        return cached
+
+    def _run():
+        try:
+            result = subprocess.run(
+                ["rclone", "about", "gdrive:", "--config", str(auth_manager.config_path)],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                info = {}
+                for line in lines:
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        info[key.strip().lower().replace(' ', '_')] = value.strip()
+                return {"connected": True, "info": info}
             return {"connected": False, "error": "Authentication expired"}
-    except subprocess.TimeoutExpired:
-        return {"connected": False, "error": "Connection timeout"}
-    except Exception as e:
-        return {"connected": False, "error": str(e)}
+        except subprocess.TimeoutExpired:
+            return {"connected": False, "error": "Connection timeout"}
+        except Exception as e:
+            return {"connected": False, "error": str(e)}
+
+    loop = asyncio.get_event_loop()
+    response = await loop.run_in_executor(None, _run)
+    _GDRIVE_STATUS_CACHE["value"] = response
+    _GDRIVE_STATUS_CACHE["ts"] = now
+    return response
 
 
 @app.delete("/api/gdrive/disconnect")
@@ -609,17 +625,32 @@ async def test_notifications():
     return {"success": success, "message": message}
 
 
+# Short-lived cache for the restore backups listing — heavy due to multiple
+# rclone roundtrips per job. The TTL is small so freshness stays acceptable
+# while a refresh button click within the window is instant.
+_RESTORE_LIST_CACHE: dict = {"value": None, "ts": 0.0}
+_RESTORE_LIST_TTL = 5.0  # seconds
+
+
 @app.get("/api/restore/backups")
-async def list_restore_backups():
+async def list_restore_backups(refresh: bool = False):
     """List all available backup snapshots.
     Sources:
       1. Remote destinations from configured Jobs
       2. Local /backups directory (ZIP files created by Jobs)
       3. If no jobs exist, attempt to restore jobs.json from self-backup first
+    Cached briefly (5s) — pass ?refresh=true to bypass.
     """
     import subprocess
     import re
     import os
+    import time as _time
+
+    if not refresh:
+        now = _time.time()
+        cached = _RESTORE_LIST_CACHE["value"]
+        if cached is not None and (now - _RESTORE_LIST_CACHE["ts"]) < _RESTORE_LIST_TTL:
+            return cached
 
     has_config = auth_manager.config_path.exists()
     jobs = job_manager.get_all_jobs()
@@ -852,7 +883,12 @@ async def list_restore_backups():
         except Exception as e:
             print(f"Error scanning remote root: {e}")
 
-    return {"jobs": results, "config_available": has_config}
+    response = {"jobs": results, "config_available": has_config}
+    # Populate cache for subsequent fast reads
+    import time as _time
+    _RESTORE_LIST_CACHE["value"] = response
+    _RESTORE_LIST_CACHE["ts"] = _time.time()
+    return response
 
 
 def _browse_local_zip(zip_path: Path, backup_path: str, sub_path: str, source_label: str = "local"):

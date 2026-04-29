@@ -18,27 +18,40 @@ class AuthManager:
         self.config_dir = settings.config_dir
         self.oauth_state_file = self.config_dir / "oauth_state.json"
         self._config_lock = threading.Lock()
+        # Cache rarely-changing values to avoid spawning rclone on every request
+        self._rclone_version_cache: Optional[str] = None
+        self._remotes_cache: Optional[list[str]] = None
+        self._remotes_cache_time: float = 0.0
+        self._remotes_cache_ttl: float = 5.0  # seconds
         
     def is_configured(self) -> bool:
         """Check if rclone is configured"""
         return self.config_path.exists() and self.config_path.stat().st_size > 0
     
     def get_remotes(self) -> list[str]:
-        """Get list of configured remotes"""
+        """Get list of configured remotes (cached for a few seconds)."""
         if not self.is_configured():
             return []
-        
+
+        import time
+        now = time.time()
+        if self._remotes_cache is not None and (now - self._remotes_cache_time) < self._remotes_cache_ttl:
+            return self._remotes_cache
+
         try:
             result = subprocess.run(
                 ["rclone", "listremotes", "--config", str(self.config_path)],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
+                timeout=10,
             )
             remotes = [line.strip().rstrip(':') for line in result.stdout.strip().split('\n') if line.strip()]
+            self._remotes_cache = remotes
+            self._remotes_cache_time = now
             return remotes
-        except subprocess.CalledProcessError:
-            return []
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return self._remotes_cache or []
     
     def save_config(self, config_content: str) -> bool:
         """Save rclone configuration from uploaded content"""
@@ -76,17 +89,21 @@ class AuthManager:
             return False, str(e)
     
     def get_rclone_version(self) -> Optional[str]:
-        """Get installed rclone version"""
+        """Get installed rclone version (cached - rclone binary doesn't change at runtime)."""
+        if self._rclone_version_cache is not None:
+            return self._rclone_version_cache
         try:
             result = subprocess.run(
                 ["rclone", "version"],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
+                timeout=5,
             )
             lines = result.stdout.strip().split('\n')
             if lines:
-                return lines[0]
+                self._rclone_version_cache = lines[0]
+                return self._rclone_version_cache
             return None
         except Exception:
             return None

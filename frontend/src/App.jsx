@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Plus, RefreshCw, Settings, Database, Cloud, CloudOff, RotateCcw, HardDrive } from 'lucide-react'
 import StatusBar from './components/StatusBar'
 import JobCard from './components/JobCard'
@@ -30,16 +30,33 @@ function App() {
   const [activeTab, setActiveTab] = useState('backup') // 'backup' | 'restore'
   const [showRestoreWizard, setShowRestoreWizard] = useState(false)
 
+  // On mount: fire status + jobs + gdrive checks in PARALLEL for fastest paint.
   useEffect(() => {
-    checkConfig()
+    let cancelled = false
+    ;(async () => {
+      try {
+        const statusPromise = getStatus()
+        const jobsPromise = getJobs().catch(() => null)        // may 401 before config
+        const gdrivePromise = getGdriveStatus().catch(() => null)
+
+        const statusRes = await statusPromise
+        if (cancelled) return
+        const cfg = !!statusRes?.data?.config_exists
+        setConfigExists(cfg)
+        setLoading(false)
+
+        const [jobsRes, gdriveRes] = await Promise.all([jobsPromise, gdrivePromise])
+        if (cancelled) return
+        if (cfg && jobsRes?.data) setJobs(jobsRes.data)
+        if (gdriveRes?.data) setGdriveStatus({ ...gdriveRes.data, checking: false })
+        else setGdriveStatus({ connected: false, checking: false })
+      } catch (e) {
+        console.error('Initial load failed:', e)
+        setLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
   }, [])
-  
-  // Check Google Drive status in background (non-blocking)
-  useEffect(() => {
-    if (configExists && !loading) {
-      checkGdriveStatus()
-    }
-  }, [configExists, loading])
 
   const checkGdriveStatus = async () => {
     try {
@@ -66,45 +83,72 @@ function App() {
     setShowConfig(true)
   }
 
-  useEffect(() => {
-    if (configExists) {
-      fetchJobs()
-      
-      // Connect to SSE for real-time updates
-      const eventSource = new EventSource('/api/events')
-      
-      eventSource.onmessage = (event) => {
-        const data = JSON.parse(event.data)
-        if (data.event === 'job_updated') {
-          fetchJobs()
-          // Clear progress when job completes
-          if (data.data?.job_id) {
-            setJobProgress(prev => {
-              const newProgress = { ...prev }
-              delete newProgress[data.data.job_id]
-              return newProgress
-            })
-          }
-        } else if (data.event === 'job_progress') {
-          setJobProgress(prev => ({
-            ...prev,
-            [data.data.job_id]: {
-              stage: data.data.stage,
-              message: data.data.message,
-              percent: data.data.percent
-            }
-          }))
-        }
-      }
-      
-      eventSource.onerror = () => {
-        // Fallback to polling if SSE fails
-        eventSource.close()
-      }
-      
-      return () => eventSource.close()
+  // Refs avoid stale closures inside the SSE handler.
+  const fetchingRef = useRef(false)
+  const debounceTimerRef = useRef(null)
+
+  const fetchJobs = useCallback(async () => {
+    if (fetchingRef.current) return
+    fetchingRef.current = true
+    try {
+      const response = await getJobs()
+      setJobs(response.data)
+    } catch (error) {
+      console.error('Failed to fetch jobs:', error)
+    } finally {
+      fetchingRef.current = false
     }
-  }, [configExists])
+  }, [])
+
+  // Debounced refetch: collapses bursts of job_updated SSE events into a single call.
+  const scheduleFetchJobs = useCallback(() => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null
+      fetchJobs()
+    }, 200)
+  }, [fetchJobs])
+
+  useEffect(() => {
+    if (!configExists) return
+
+    // Initial paint already loaded jobs in the mount effect; SSE keeps them fresh.
+    const eventSource = new EventSource('/api/events')
+
+    eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data)
+      if (data.event === 'job_updated') {
+        scheduleFetchJobs()
+        // Clear progress when job completes
+        if (data.data?.job_id) {
+          setJobProgress(prev => {
+            if (!(data.data.job_id in prev)) return prev
+            const newProgress = { ...prev }
+            delete newProgress[data.data.job_id]
+            return newProgress
+          })
+        }
+      } else if (data.event === 'job_progress') {
+        setJobProgress(prev => ({
+          ...prev,
+          [data.data.job_id]: {
+            stage: data.data.stage,
+            message: data.data.message,
+            percent: data.data.percent
+          }
+        }))
+      }
+    }
+
+    eventSource.onerror = () => {
+      eventSource.close()
+    }
+
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
+      eventSource.close()
+    }
+  }, [configExists, scheduleFetchJobs])
 
   const checkConfig = async () => {
     try {
@@ -114,21 +158,6 @@ function App() {
       console.error('Failed to check config:', error)
     } finally {
       setLoading(false)
-    }
-  }
-
-  const [fetching, setFetching] = React.useState(false)
-  
-  const fetchJobs = async () => {
-    if (fetching) return // Prevent concurrent requests
-    setFetching(true)
-    try {
-      const response = await getJobs()
-      setJobs(response.data)
-    } catch (error) {
-      console.error('Failed to fetch jobs:', error)
-    } finally {
-      setFetching(false)
     }
   }
 
