@@ -885,51 +885,117 @@ def _browse_local_zip(zip_path: Path, backup_path: str, sub_path: str, source_la
         raise HTTPException(status_code=400, detail="Invalid or encrypted ZIP (cannot browse without extraction)")
 
 
-def _ensure_remote_zip_cached(remote_zip_path: str) -> Path:
-    """Download a remote ZIP to a local cache directory (idempotent) and return its local path."""
-    import hashlib
-    import subprocess as _sub
-    cache_root = Path("/tmp/mirrorclone_zip_cache")
-    cache_root.mkdir(parents=True, exist_ok=True)
-    # Use a stable hash of the remote path as cache key
-    h = hashlib.sha1(remote_zip_path.encode('utf-8')).hexdigest()[:16]
-    zip_name = Path(remote_zip_path).name
-    local_zip = cache_root / f"{h}_{zip_name}"
-    if local_zip.exists() and local_zip.stat().st_size > 0:
-        return local_zip
-
-    # Download via rclone copyto for exact filename
-    cmd = [
-        "rclone", "copyto", remote_zip_path, str(local_zip),
-        "--config", str(auth_manager.config_path),
-    ]
-    res = _sub.run(cmd, capture_output=True, text=True, timeout=1800)
-    if res.returncode != 0 or not local_zip.exists():
-        raise HTTPException(status_code=500, detail=f"Failed to fetch remote ZIP for browsing: {res.stderr}")
-    return local_zip
-
-
-def _try_fetch_manifest(remote_manifest_path: str) -> Optional[dict]:
-    """Try to download a small remote manifest.json into memory and return its parsed dict.
-    Returns None if the manifest does not exist or fails to download.
+class _RcloneRemoteFile:
+    """Read-only, seekable file-like wrapper over a remote file via `rclone cat`
+    with byte-range offsets. Each read spawns an rclone subprocess, so callers
+    should minimize reads (e.g. zipfile only reads the central directory).
     """
-    import subprocess as _sub
-    try:
-        res = _sub.run(
-            ["rclone", "cat", remote_manifest_path,
-             "--config", str(auth_manager.config_path)],
-            capture_output=True, text=True, timeout=60
+
+    def __init__(self, remote_path: str, config_path: Path, size: Optional[int] = None):
+        import subprocess as _sub
+        self._sub = _sub
+        self.remote_path = remote_path
+        self.config_path = config_path
+        self._size = size
+        self._pos = 0
+
+    def _ensure_size(self) -> int:
+        if self._size is None:
+            res = self._sub.run(
+                ["rclone", "lsjson", self.remote_path,
+                 "--config", str(self.config_path), "--no-modtime"],
+                capture_output=True, text=True, timeout=30
+            )
+            if res.returncode != 0:
+                raise IOError(f"rclone lsjson failed: {res.stderr}")
+            data = json.loads(res.stdout)
+            if not data:
+                raise IOError(f"Remote file not found: {self.remote_path}")
+            self._size = data[0].get("Size", 0)
+        return self._size
+
+    # file-like protocol
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence == 0:
+            self._pos = offset
+        elif whence == 1:
+            self._pos += offset
+        elif whence == 2:
+            self._pos = self._ensure_size() + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        if self._pos < 0:
+            self._pos = 0
+        return self._pos
+
+    def read(self, size: int = -1) -> bytes:
+        total = self._ensure_size()
+        if self._pos >= total:
+            return b""
+        if size is None or size < 0:
+            size = total - self._pos
+        if size == 0:
+            return b""
+        # Clamp to file size to avoid rclone errors
+        count = min(size, total - self._pos)
+        res = self._sub.run(
+            ["rclone", "cat", self.remote_path,
+             "--offset", str(self._pos),
+             "--count", str(count),
+             "--config", str(self.config_path)],
+            capture_output=True, timeout=180
         )
-        if res.returncode != 0 or not res.stdout.strip():
-            return None
-        return json.loads(res.stdout)
-    except Exception as e:
-        print(f"Manifest fetch failed: {e}")
-        return None
+        if res.returncode != 0:
+            raise IOError(f"rclone cat failed at offset {self._pos}: {res.stderr!r}")
+        data = res.stdout or b""
+        self._pos += len(data)
+        return data
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _browse_remote_zip_via_byterange(remote_zip_path: str, zip_size: Optional[int],
+                                     backup_path: str, sub_path: str):
+    """Open a remote ZIP over rclone byte ranges and list its central directory.
+
+    Avoids downloading the full archive. Uses Python's stdlib zipfile which
+    reads only the End-of-Central-Directory + Central Directory (tens of KB).
+    Raises on failure so the caller can fall back to a full download.
+    """
+    import zipfile as _zipfile
+
+    rf = _RcloneRemoteFile(remote_zip_path, auth_manager.config_path, size=zip_size)
+    with _zipfile.ZipFile(rf, 'r') as zf:
+        entries = [
+            {"name": info.filename, "size": info.file_size, "is_dir": info.is_dir()}
+            for info in zf.infolist()
+        ]
+    return _browse_manifest(
+        {"entries": entries, "zip_filename": Path(remote_zip_path).name},
+        backup_path, sub_path,
+    )
 
 
 def _browse_manifest(manifest: dict, backup_path: str, sub_path: str):
-    """Build a directory listing at `sub_path` from a flat manifest of entries."""
+    """Build a directory listing at `sub_path` from a flat entries list.
+    Used internally by the byte-range ZIP browser.
+    """
     entries = manifest.get("entries", [])
     prefix = sub_path.rstrip('/') + '/' if sub_path else ''
     seen_dirs = set()
@@ -1009,32 +1075,32 @@ async def browse_backup(backup_path: str, sub_path: str = ""):
         )
         return res
 
-    # ── Fast path: try to use a sidecar manifest.json next to the ZIP ─────────
-    # This avoids downloading the (potentially huge) ZIP just for browsing.
+    # ── If the snapshot folder contains a single ZIP, browse INTO it via ──────
+    # byte-range reads of the ZIP's central directory (no full download).
     try:
         top = await loop.run_in_executor(None, lambda: _list_remote(backup_path.rstrip('/')))
         if top.returncode == 0 and top.stdout.strip():
             top_items = json.loads(top.stdout)
             zip_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").lower().endswith(".zip")]
-            manifest_files = [i for i in top_items if not i.get("IsDir") and i.get("Name", "").endswith(".manifest.json")]
-            non_special = [i for i in top_items if i not in zip_files and i not in manifest_files]
+            non_zip = [i for i in top_items if i not in zip_files]
 
-            # Prefer manifest if available - this is the fast path.
-            if manifest_files and len(zip_files) == 1 and not non_special:
-                remote_manifest = f"{backup_path.rstrip('/')}/{manifest_files[0]['Name']}"
-                manifest = await loop.run_in_executor(None, lambda: _try_fetch_manifest(remote_manifest))
-                if manifest:
-                    return _browse_manifest(manifest, backup_path, sub_path)
-
-            # Fallback: download the full ZIP and browse it locally.
-            if len(zip_files) == 1 and not non_special:
-                remote_zip = f"{backup_path.rstrip('/')}/{zip_files[0]['Name']}"
-                cached_zip = await loop.run_in_executor(None, lambda: _ensure_remote_zip_cached(remote_zip))
-                return _browse_local_zip(cached_zip, backup_path, sub_path, source_label="remote_zip")
+            if len(zip_files) == 1 and not non_zip:
+                zip_info = zip_files[0]
+                remote_zip = f"{backup_path.rstrip('/')}/{zip_info['Name']}"
+                zip_size = zip_info.get("Size")
+                return await loop.run_in_executor(
+                    None,
+                    lambda: _browse_remote_zip_via_byterange(remote_zip, zip_size, backup_path, sub_path)
+                )
     except HTTPException:
         raise
     except Exception as e:
-        print(f"browse_backup: manifest/zip path failed: {e}")
+        # If byte-range reading fails (encrypted ZIP, exotic remote, etc.),
+        # surface a clear error instead of silently falling back.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read ZIP central directory from remote: {e}"
+        )
 
     # ── Plain remote folder listing (no ZIP, or multiple files) ───────────────
     full_path = f"{backup_path.rstrip('/')}/{sub_path}".rstrip('/')
