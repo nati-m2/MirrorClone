@@ -42,6 +42,9 @@ class JobEngine:
                 )
                 if zip_path:
                     self._log(job.id, "progress", f"ZIP created: {zip_path}")
+                    # Cleanup old local ZIPs if local retention is configured
+                    if job.local_retention_count > 0:
+                        await self._cleanup_old_local_zips_async(job)
                     if on_progress:
                         await on_progress("uploading", "מעלה קבצים...", 0)
                     return await self._upload_file(job, zip_path, on_progress)
@@ -276,6 +279,49 @@ class JobEngine:
         """Async version - Keep only the latest N backups"""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: self._cleanup_old_backups(job, job_name_prefix))
+
+    def _cleanup_old_local_zips(self, job: Job):
+        """Keep only the latest N local ZIP backups in /backups for this job"""
+        try:
+            backups_dir = Path("/backups")
+            if not backups_dir.exists():
+                return
+
+            clean_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in job.name)
+            # Match files: JobName_YYYYMMDD_HHMMSS.zip
+            pattern = re.compile(rf"^{re.escape(clean_name)}_(\d{{8}})_(\d{{6}})\.zip$")
+
+            matching = []
+            for f in backups_dir.iterdir():
+                if not f.is_file() or f.suffix != '.zip':
+                    continue
+                m = pattern.match(f.name)
+                if m:
+                    # Sort key: timestamp string (YYYYMMDDHHMMSS)
+                    matching.append((f, m.group(1) + m.group(2)))
+
+            # Sort newest first
+            matching.sort(key=lambda x: x[1], reverse=True)
+
+            # Delete files beyond retention count
+            to_delete = matching[job.local_retention_count:]
+            deleted = 0
+            for f, _ in to_delete:
+                try:
+                    f.unlink()
+                    deleted += 1
+                except Exception as e:
+                    print(f"Failed to delete {f}: {e}")
+
+            if deleted > 0:
+                self._log(job.id, "progress", f"Deleted {deleted} old local ZIP backup(s)")
+        except Exception as e:
+            print(f"Local cleanup error: {e}")
+
+    async def _cleanup_old_local_zips_async(self, job: Job):
+        """Async wrapper for local ZIP cleanup"""
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: self._cleanup_old_local_zips(job))
     
     def _create_zip_multi(self, source_paths: list[str], job_name: str, password: Optional[str] = None) -> Optional[str]:
         """Create ZIP archive from multiple source paths preserving structure"""

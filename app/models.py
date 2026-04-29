@@ -22,7 +22,8 @@ class Job(BaseModel):
     preserve_links: bool = Field(default=True, description="Preserve symbolic links")
     compress_before_upload: bool = Field(default=False, description="Create ZIP archive before upload")
     zip_password: Optional[str] = Field(default=None, description="Password for ZIP encryption")
-    retention_count: int = Field(default=0, description="Keep only X latest backups (0 = keep all)")
+    retention_count: int = Field(default=0, description="Keep only X latest remote backups (0 = keep all)")
+    local_retention_count: int = Field(default=0, description="Keep only X latest local ZIP backups in /backups (0 = keep all)")
     
     status: JobStatus = Field(default=JobStatus.IDLE, description="Current job status")
     last_run: Optional[datetime] = Field(default=None, description="Last execution timestamp")
@@ -43,6 +44,7 @@ class JobCreate(BaseModel):
     compress_before_upload: bool = False
     zip_password: Optional[str] = None
     retention_count: int = 0
+    local_retention_count: int = 0
 
 
 class JobUpdate(BaseModel):
@@ -56,6 +58,7 @@ class JobUpdate(BaseModel):
     compress_before_upload: Optional[bool] = None
     zip_password: Optional[str] = None
     retention_count: Optional[int] = None
+    local_retention_count: Optional[int] = None
 
 
 class JobLog(BaseModel):

@@ -33,6 +33,7 @@ const JobDialog = ({ job, onSave, onClose }) => {
     compress_before_upload: false,
     zip_password: '',
     retention_count: 0,
+    local_retention_count: 0,
   })
   const [showCronPresets, setShowCronPresets] = useState(false)
   const [showPathSuggestions, setShowPathSuggestions] = useState(false)
@@ -56,6 +57,7 @@ const JobDialog = ({ job, onSave, onClose }) => {
         compress_before_upload: job.compress_before_upload !== undefined ? job.compress_before_upload : false,
         zip_password: job.zip_password || '',
         retention_count: job.retention_count !== undefined ? job.retention_count : 0,
+        local_retention_count: job.local_retention_count !== undefined ? job.local_retention_count : 0,
       })
     }
   }, [job])
@@ -73,8 +75,8 @@ const JobDialog = ({ job, onSave, onClose }) => {
     
     if (type === 'checkbox') {
       newValue = checked
-    } else if (name === 'retention_count') {
-      newValue = parseInt(value, 10)
+    } else if (name === 'retention_count' || name === 'local_retention_count') {
+      newValue = parseInt(value, 10) || 0
     }
     
     setFormData(prev => ({
@@ -282,7 +284,7 @@ const JobDialog = ({ job, onSave, onClose }) => {
             </div>
 
             <div>
-              <label className="text-sm font-medium mb-1 block">Keep backups</label>
+              <label className="text-sm font-medium mb-1 block">Keep remote backups</label>
               <div className="flex items-center gap-2">
                 <Input
                   type="number"
@@ -298,9 +300,32 @@ const JobDialog = ({ job, onSave, onClose }) => {
                 </span>
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                0 = keep all, or enter number of backups to keep
+                Retention for cloud snapshots (0 = keep all)
               </p>
             </div>
+
+            {formData.compress_before_upload && (
+              <div>
+                <label className="text-sm font-medium mb-1 block">Keep local ZIP backups</label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    name="local_retention_count"
+                    value={formData.local_retention_count}
+                    onChange={handleChange}
+                    min={0}
+                    placeholder="0"
+                    className="w-24"
+                  />
+                  <span className="text-sm text-muted-foreground">
+                    {formData.local_retention_count === 0 ? 'Keep all' : `Keep last ${formData.local_retention_count}`}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Retention for local ZIP files in /backups volume (0 = keep all)
+                </p>
+              </div>
+            )}
 
             <div className="flex gap-2 pt-4">
               <Button type="submit" className="flex-1">

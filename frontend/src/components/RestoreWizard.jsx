@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react'
 import {
   ChevronRight, ChevronLeft, ChevronDown, FolderOpen, Folder,
   File, Check, X, Lock, Eye, EyeOff, RefreshCw, RotateCcw,
-  Shield, HardDrive, AlertTriangle, CheckCircle2, Loader2
+  Shield, HardDrive, AlertTriangle, CheckCircle2, Loader2,
+  Cloud, Server
 } from 'lucide-react'
 import Button from './ui/Button'
 import { Card, CardContent } from './ui/Card'
@@ -124,6 +125,15 @@ const StepSelectBackup = ({ onSelect }) => {
                     <div>
                       <div className="font-mono text-sm">{formatDate(snap.timestamp)}</div>
                       <div className="flex items-center gap-2 mt-0.5">
+                        {snap.source === 'local' ? (
+                          <span className="text-xs bg-purple-500/20 text-purple-300 px-1.5 py-0.5 rounded flex items-center gap-1" title="Stored locally in /backups volume">
+                            <Server className="h-2.5 w-2.5" /> Local
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-sky-500/20 text-sky-300 px-1.5 py-0.5 rounded flex items-center gap-1" title="Stored in cloud remote">
+                            <Cloud className="h-2.5 w-2.5" /> Cloud
+                          </span>
+                        )}
                         {snap.compressed && (
                           <span className="text-xs bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded">ZIP</span>
                         )}
@@ -131,6 +141,9 @@ const StepSelectBackup = ({ onSelect }) => {
                           <span className="text-xs bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded flex items-center gap-1">
                             <Lock className="h-2.5 w-2.5" /> Encrypted
                           </span>
+                        )}
+                        {snap.size_mb != null && (
+                          <span className="text-xs text-muted-foreground">{snap.size_mb} MB</span>
                         )}
                       </div>
                     </div>
