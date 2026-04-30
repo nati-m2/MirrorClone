@@ -149,6 +149,152 @@ app.add_middleware(
 )
 
 
+# Cache for the usage stats — both local scan and rclone about/size calls are
+# slow enough that we don't want to re-run them on every UI refresh.
+_USAGE_CACHE: dict = {"value": None, "ts": 0.0}
+_USAGE_TTL = 60.0  # seconds
+
+
+@app.get("/api/stats/usage")
+async def get_usage_stats(refresh: bool = False):
+    """Report backup space usage.
+
+    Returns:
+      {
+        "local": {"bytes": int, "count": int, "path": "/backups"},
+        "remotes": [
+          {
+            "name": str, "type": str,
+            "backup_bytes": int|None,     # size of MirrorCloneBackups folder
+            "backup_count": int|None,     # number of objects inside it
+            "total_bytes": int|None,      # from rclone about (if supported)
+            "used_bytes": int|None,
+            "free_bytes": int|None,
+            "trashed_bytes": int|None,
+            "error": str|None,
+          }, ...
+        ],
+        "total_backup_bytes": int,  # local + all remotes combined
+      }
+    """
+    import subprocess
+    import time as _time
+
+    if not refresh:
+        now = _time.time()
+        cached = _USAGE_CACHE["value"]
+        if cached is not None and (now - _USAGE_CACHE["ts"]) < _USAGE_TTL:
+            return cached
+
+    loop = asyncio.get_event_loop()
+
+    # ── Local /backups scan (sum *.zip sizes) ─────────────────────────────────
+    def _scan_local():
+        backups_dir = Path("/backups")
+        total = 0
+        count = 0
+        if backups_dir.exists():
+            try:
+                for f in backups_dir.iterdir():
+                    if f.is_file() and f.suffix == '.zip':
+                        try:
+                            total += f.stat().st_size
+                            count += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+        return {"bytes": total, "count": count, "path": "/backups"}
+
+    # ── Per-remote: rclone size + rclone about ────────────────────────────────
+    def _remote_size(remote_name: str):
+        """Return (bytes, count) for <remote>:MirrorCloneBackups. None on error."""
+        try:
+            res = subprocess.run(
+                ["rclone", "size", f"{remote_name}:MirrorCloneBackups",
+                 "--json", "--config", str(auth_manager.config_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if res.returncode != 0:
+                # Directory may not exist yet — treat as zero, not an error.
+                if "directory not found" in (res.stderr or "").lower():
+                    return 0, 0, None
+                return None, None, (res.stderr or "rclone size failed").strip()[:200]
+            data = json.loads(res.stdout)
+            return int(data.get("bytes", 0)), int(data.get("count", 0)), None
+        except subprocess.TimeoutExpired:
+            return None, None, "timeout"
+        except Exception as e:
+            return None, None, str(e)[:200]
+
+    def _remote_about(remote_name: str):
+        """Return capacity dict from `rclone about --json`. None if unsupported."""
+        try:
+            res = subprocess.run(
+                ["rclone", "about", f"{remote_name}:",
+                 "--json", "--config", str(auth_manager.config_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if res.returncode != 0:
+                return None
+            data = json.loads(res.stdout) if res.stdout.strip() else {}
+            return {
+                "total_bytes": data.get("total"),
+                "used_bytes": data.get("used"),
+                "free_bytes": data.get("free"),
+                "trashed_bytes": data.get("trashed"),
+            }
+        except Exception:
+            return None
+
+    def _probe_remote(r: dict):
+        size_bytes, size_count, size_err = _remote_size(r["name"])
+        about = _remote_about(r["name"]) or {}
+        return {
+            "name": r["name"],
+            "type": r.get("type", ""),
+            "backup_bytes": size_bytes,
+            "backup_count": size_count,
+            "total_bytes": about.get("total_bytes"),
+            "used_bytes": about.get("used_bytes"),
+            "free_bytes": about.get("free_bytes"),
+            "trashed_bytes": about.get("trashed_bytes"),
+            "error": size_err,
+        }
+
+    # Run local scan and all remote probes in parallel
+    remotes = auth_manager.get_remotes_detailed() if auth_manager.config_path.exists() else []
+    local_future = loop.run_in_executor(None, _scan_local)
+    remote_futures = [loop.run_in_executor(None, _probe_remote, r) for r in remotes]
+
+    local = await local_future
+    remote_results = await asyncio.gather(*remote_futures, return_exceptions=True) if remote_futures else []
+
+    remote_list = []
+    for r, res in zip(remotes, remote_results):
+        if isinstance(res, Exception):
+            remote_list.append({
+                "name": r["name"], "type": r.get("type", ""),
+                "backup_bytes": None, "backup_count": None,
+                "total_bytes": None, "used_bytes": None,
+                "free_bytes": None, "trashed_bytes": None,
+                "error": str(res)[:200],
+            })
+        else:
+            remote_list.append(res)
+
+    total_backup = local["bytes"] + sum((x.get("backup_bytes") or 0) for x in remote_list)
+
+    response = {
+        "local": local,
+        "remotes": remote_list,
+        "total_backup_bytes": total_backup,
+    }
+    _USAGE_CACHE["value"] = response
+    _USAGE_CACHE["ts"] = _time.time()
+    return response
+
+
 @app.get("/api/status")
 async def get_status() -> SystemStatus:
     """Get system status"""

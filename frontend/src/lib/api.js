@@ -58,6 +58,9 @@ export const browseFiles = (path = '/data') => {
 export const getGdriveStatus = () => api.get('/gdrive/status')
 export const disconnectGdrive = () => api.delete('/gdrive/disconnect')
 
+export const getUsageStats = (refresh = false) =>
+  api.get('/stats/usage', { params: refresh ? { refresh: true } : {} })
+
 export const listRestoreBackups = (refresh = false) =>
   api.get('/restore/backups', { params: refresh ? { refresh: true } : {} })
 export const browseBackup = (backupPath, subPath = '') =>
