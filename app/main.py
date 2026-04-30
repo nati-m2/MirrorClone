@@ -274,8 +274,51 @@ async def browse_files(path: str = "/data"):
 
 @app.get("/api/config/remotes")
 async def get_remotes() -> list[str]:
-    """Get configured rclone remotes"""
+    """Get configured rclone remotes (legacy - names only)."""
     return auth_manager.get_remotes()
+
+
+@app.get("/api/config/remotes/detailed")
+async def get_remotes_detailed() -> list[dict]:
+    """Get configured rclone remotes with their type, e.g. [{name: "gdrive", type: "drive"}]."""
+    return auth_manager.get_remotes_detailed()
+
+
+@app.get("/api/providers")
+async def get_providers():
+    """Return rclone's full provider catalogue (name, description, options).
+
+    Lets the frontend render dynamic forms for any backend (S3, B2, SFTP, ...)
+    without baking provider knowledge into the UI.
+    """
+    return {"providers": auth_manager.get_providers()}
+
+
+@app.post("/api/config/remotes")
+async def create_remote(payload: dict):
+    """Create a new generic rclone remote (any non-OAuth provider).
+
+    Body: {"name": "...", "type": "s3"|"b2"|"sftp"|..., "params": {key: value, ...}}
+    For Google Drive prefer the OAuth endpoints under /api/auth/google-drive/.
+    """
+    name = (payload or {}).get("name", "").strip()
+    remote_type = (payload or {}).get("type", "").strip()
+    params = (payload or {}).get("params") or {}
+    if not name or not remote_type:
+        raise HTTPException(status_code=400, detail="name and type are required")
+    success, message = auth_manager.create_remote(name, remote_type, params)
+    if success:
+        return {"message": message, "name": name}
+    raise HTTPException(status_code=400, detail=message)
+
+
+@app.delete("/api/config/remotes/{remote_name}")
+async def delete_remote(remote_name: str):
+    """Delete an rclone remote from the config."""
+    success, message = auth_manager.delete_remote(remote_name)
+    if success:
+        return {"message": message}
+    raise HTTPException(status_code=404 if "not found" in message.lower() else 500, detail=message)
 
 
 @app.post("/api/config/upload")

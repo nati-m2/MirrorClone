@@ -6,6 +6,10 @@ const api = axios.create({
 
 export const getStatus = () => api.get('/status')
 export const getRemotes = () => api.get('/config/remotes')
+export const getRemotesDetailed = () => api.get('/config/remotes/detailed')
+export const getProviders = () => api.get('/providers')
+export const createRemote = (payload) => api.post('/config/remotes', payload)
+export const deleteRemote = (name) => api.delete(`/config/remotes/${encodeURIComponent(name)}`)
 export const uploadConfig = (file) => {
   const formData = new FormData()
   formData.append('file', file)

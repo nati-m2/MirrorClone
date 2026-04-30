@@ -1,9 +1,27 @@
 import React, { useState, useEffect } from 'react'
-import { X, Clock, Folder } from 'lucide-react'
+import { X, Clock, Folder, Cloud, AlertTriangle } from 'lucide-react'
 import Button from './ui/Button'
 import Input from './ui/Input'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card'
 import FileBrowser from './FileBrowser'
+import { getRemotesDetailed } from '../lib/api'
+
+// Default subfolder appended after the remote name. Kept for backwards compat
+// with snapshots already created under "<remote>:MirrorCloneBackups/...".
+const DEFAULT_PREFIX = 'MirrorCloneBackups'
+
+// Split a destination string like "gdrive:MirrorCloneBackups/My Backup" into
+// { remote: "gdrive", folder: "My Backup" }. Tolerates legacy values.
+const parseDestination = (dest) => {
+  if (!dest) return { remote: '', folder: '' }
+  const idx = dest.indexOf(':')
+  if (idx === -1) return { remote: '', folder: dest }
+  const remote = dest.slice(0, idx)
+  let path = dest.slice(idx + 1).replace(/^\/+/, '')
+  if (path.startsWith(`${DEFAULT_PREFIX}/`)) path = path.slice(DEFAULT_PREFIX.length + 1)
+  else if (path === DEFAULT_PREFIX) path = ''
+  return { remote, folder: path }
+}
 
 const CRON_PRESETS = [
   { label: 'Every hour', value: '0 * * * *' },
@@ -21,10 +39,11 @@ const COMMON_PATHS = [
   '/opt',
 ]
 
-const JobDialog = ({ job, onSave, onClose }) => {
+const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
   const [formData, setFormData] = useState({
     name: '',
     source_path: '',
+    remote: '',
     destination: '',
     cron_expression: '0 2 * * *',
     enabled: true,
@@ -38,18 +57,37 @@ const JobDialog = ({ job, onSave, onClose }) => {
   const [showCronPresets, setShowCronPresets] = useState(false)
   const [showPathSuggestions, setShowPathSuggestions] = useState(false)
   const [showFileBrowser, setShowFileBrowser] = useState(false)
+  const [remotes, setRemotes] = useState([])
+  const [remotesLoading, setRemotesLoading] = useState(true)
+
+  // Load configured connections so the user can pick one for this job.
+  useEffect(() => {
+    let active = true
+    getRemotesDetailed()
+      .then(res => {
+        if (!active) return
+        const list = res.data || []
+        setRemotes(list)
+        // Auto-pick first connection on new jobs when there's only one.
+        setFormData(prev => {
+          if (prev.remote || !list.length) return prev
+          if (!job) return { ...prev, remote: list[0].name }
+          return prev
+        })
+      })
+      .catch(() => {})
+      .finally(() => { if (active) setRemotesLoading(false) })
+    return () => { active = false }
+  }, [job])
 
   useEffect(() => {
     if (job) {
-      // Extract folder name from full destination path
-      let destFolder = job.destination || ''
-      if (destFolder.startsWith('gdrive:MirrorCloneBackups/')) {
-        destFolder = destFolder.replace('gdrive:MirrorCloneBackups/', '')
-      }
+      const { remote, folder } = parseDestination(job.destination)
       setFormData({
         name: job.name || '',
         source_path: job.source_path || '',
-        destination: destFolder,
+        remote,
+        destination: folder,
         cron_expression: job.cron_expression || '0 2 * * *',
         enabled: job.enabled !== undefined ? job.enabled : true,
         preserve_metadata: job.preserve_metadata !== undefined ? job.preserve_metadata : true,
@@ -64,9 +102,13 @@ const JobDialog = ({ job, onSave, onClose }) => {
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    // Build full destination path
-    const fullDestination = `gdrive:MirrorCloneBackups/${formData.destination.replace(/^\/+/, '')}`
-    onSave({ ...formData, destination: fullDestination })
+    if (!formData.remote) return
+    // Build full destination: <remote>:MirrorCloneBackups/<folder>
+    const folder = formData.destination.replace(/^\/+/, '')
+    const fullDestination = `${formData.remote}:${DEFAULT_PREFIX}/${folder}`
+    // Drop UI-only field before posting.
+    const { remote, ...rest } = formData
+    onSave({ ...rest, destination: fullDestination })
   }
 
   const handleChange = (e) => {
@@ -156,9 +198,57 @@ const JobDialog = ({ job, onSave, onClose }) => {
             </div>
 
             <div>
+              <label className="text-sm font-medium mb-1 block flex items-center gap-1.5">
+                <Cloud className="h-3.5 w-3.5" />
+                Connection
+              </label>
+              {remotesLoading ? (
+                <div className="text-xs text-muted-foreground">Loading connections…</div>
+              ) : remotes.length === 0 ? (
+                <div className="flex items-start gap-2 p-3 rounded-md border border-amber-500/40 bg-amber-500/10 text-sm">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <div className="font-medium text-amber-300">No connections configured</div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      Add a cloud or storage connection before creating a job.
+                    </div>
+                    {onManageConnections && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={onManageConnections}
+                        className="mt-2 h-7 px-2 text-xs"
+                      >
+                        Manage connections
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <select
+                  name="remote"
+                  value={formData.remote}
+                  onChange={handleChange}
+                  required
+                  className="w-full h-10 px-3 bg-background border border-input rounded-md text-sm
+                    focus:outline-none focus:ring-2 focus:ring-primary/50"
+                >
+                  <option value="" disabled>Select a connection…</option>
+                  {remotes.map(r => (
+                    <option key={r.name} value={r.name}>
+                      {r.name} ({r.type || 'unknown'})
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+
+            <div>
               <label className="text-sm font-medium mb-1 block">Backup Folder Name</label>
               <div className="flex items-center gap-1">
-                <span className="text-sm text-muted-foreground">gdrive:MirrorCloneBackups/</span>
+                <span className="text-sm text-muted-foreground font-mono truncate max-w-[60%]" title={`${formData.remote || '<connection>'}:${DEFAULT_PREFIX}/`}>
+                  {(formData.remote || '<connection>') + ':' + DEFAULT_PREFIX + '/'}
+                </span>
                 <Input
                   name="destination"
                   value={formData.destination}
@@ -169,7 +259,7 @@ const JobDialog = ({ job, onSave, onClose }) => {
                 />
               </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Folder name in Google Drive (under backups/)
+                Folder name on the selected connection.
               </p>
             </div>
 

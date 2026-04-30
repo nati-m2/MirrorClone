@@ -342,6 +342,112 @@ team_drive =
             except Exception as e:
                 return False, f"Configuration failed: {str(e)}"
     
+    # ── Generic remote management (any rclone provider) ────────────────────────
+    _providers_cache: Optional[list] = None
+
+    def get_providers(self) -> list:
+        """Return all rclone providers (cached): name, description, options.
+
+        Calls `rclone config providers --json`. The output is the canonical
+        rclone schema describing every backend and every option each backend
+        accepts (Required, IsPassword, Default, Examples, Hide, Advanced, ...).
+        """
+        if AuthManager._providers_cache is not None:
+            return AuthManager._providers_cache
+        try:
+            result = subprocess.run(
+                ["rclone", "config", "providers"],
+                capture_output=True, text=True, check=True, timeout=10,
+            )
+            data = json.loads(result.stdout)
+            # rclone returns {"providers": [...]} on newer versions, or a raw list on older.
+            providers = data.get("providers", data) if isinstance(data, dict) else data
+            AuthManager._providers_cache = providers
+            return providers
+        except Exception as e:
+            print(f"Failed to read rclone providers: {e}")
+            return []
+
+    def get_remotes_detailed(self) -> list[dict]:
+        """Parse rclone.conf and return [{name, type}] for every configured remote."""
+        if not self.is_configured():
+            return []
+        result = []
+        try:
+            content = self.config_path.read_text()
+        except Exception:
+            return []
+
+        current = None
+        for raw in content.split('\n'):
+            line = raw.strip()
+            if not line or line.startswith('#') or line.startswith(';'):
+                continue
+            if line.startswith('[') and line.endswith(']'):
+                if current:
+                    result.append(current)
+                current = {"name": line[1:-1].strip(), "type": ""}
+            elif current and '=' in line:
+                key, _, value = line.partition('=')
+                if key.strip() == 'type':
+                    current["type"] = value.strip()
+        if current:
+            result.append(current)
+        return result
+
+    def create_remote(self, name: str, remote_type: str, params: dict) -> tuple[bool, str]:
+        """Create a generic rclone remote via `rclone config create`.
+
+        Works for every non-OAuth backend (S3, B2, SFTP, FTP, WebDAV, Local, ...).
+        For OAuth-based backends (drive, dropbox, onedrive, box) prefer the
+        dedicated OAuth helpers — but this still works if the caller passes a
+        prepared `token` field.
+        """
+        if not name or not remote_type:
+            return False, "Connection name and provider type are required"
+        # Validate name (rclone requires alnum + - _ + space)
+        clean_name = name.strip()
+        if not clean_name or any(c in clean_name for c in '[]:'):
+            return False, f"Invalid connection name: '{name}'"
+
+        with self._config_lock:
+            try:
+                self.config_dir.mkdir(parents=True, exist_ok=True)
+
+                # Refuse to overwrite an existing remote silently
+                if self.config_path.exists():
+                    existing = self.config_path.read_text()
+                    if f"[{clean_name}]" in existing:
+                        return False, f"Connection '{clean_name}' already exists"
+
+                cmd = [
+                    "rclone", "config", "create", clean_name, remote_type,
+                    "--config", str(self.config_path),
+                    "--non-interactive",  # never prompt
+                    "--obscure",          # auto-obscure password fields
+                ]
+                # Pass each parameter as key=value
+                for k, v in (params or {}).items():
+                    if v is None or v == "":
+                        continue
+                    cmd.append(f"{k}={v}")
+
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode != 0:
+                    err = result.stderr.strip() or result.stdout.strip()
+                    return False, f"rclone refused config: {err[:300]}"
+
+                # Bust caches
+                self._remotes_cache = None
+                AuthManager._providers_cache = None  # safe even if unrelated
+                return True, f"Connection '{clean_name}' created"
+            except subprocess.TimeoutExpired:
+                return False, "rclone timed out while creating the connection"
+            except Exception as e:
+                return False, f"Failed to create connection: {e}"
+
     def delete_remote(self, remote_name: str) -> tuple[bool, str]:
         """Delete a remote from config"""
         with self._config_lock:
@@ -369,7 +475,8 @@ team_drive =
                 # Clean up extra newlines
                 final_content = '\n'.join(new_lines).strip()
                 self.config_path.write_text(final_content + '\n' if final_content else '')
-                
+                # Bust the remotes cache so the UI sees the change instantly
+                self._remotes_cache = None
                 return True, f"Remote '{remote_name}' deleted successfully"
                 
             except Exception as e:

@@ -3,7 +3,7 @@ import { Plus, RefreshCw, Database, Cloud, CloudOff, RotateCcw, HardDrive, Setti
 import JobCard from './components/JobCard'
 import BackupStatistics from './components/BackupStatistics'
 import JobDialog from './components/JobDialog'
-import ConfigSetup from './components/ConfigSetup'
+import ConnectionsManager from './components/ConnectionsManager'
 import RestoreWizard from './components/RestoreWizard'
 import RestoreSnapshots from './components/RestoreSnapshots'
 import Button from './components/ui/Button'
@@ -241,50 +241,28 @@ function App() {
     )
   }
 
+  // Initial setup: no rclone config yet → jump straight into Connections.
   if (!configExists) {
     return (
-      <div className="min-h-screen bg-background">
-        <div className="border-b border-border bg-card px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Database className="h-8 w-8 text-primary" />
-            <div>
-              <h1 className="text-2xl font-bold">MirrorClone</h1>
-              <p className="text-sm text-muted-foreground">
-                Reliable Rclone Mirror Wrapper
-              </p>
-            </div>
-          </div>
-        </div>
-        <ConfigSetup onConfigured={checkConfig} />
-      </div>
+      <ConnectionsManager
+        onClose={() => {
+          checkConfig()
+          checkGdriveStatus()
+        }}
+      />
     )
   }
 
+  // Settings button → open Connections as a full-page view.
   if (showConfig) {
     return (
-      <div className="min-h-screen bg-background">
-        <div className="border-b border-border bg-card px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Database className="h-8 w-8 text-primary" />
-            <div>
-              <h1 className="text-2xl font-bold">MirrorClone</h1>
-              <p className="text-sm text-muted-foreground">
-                Reliable Rclone Mirror Wrapper
-              </p>
-            </div>
-          </div>
-        </div>
-        <ConfigSetup onConfigured={() => {
+      <ConnectionsManager
+        onClose={() => {
           checkConfig()
           checkGdriveStatus()
           setShowConfig(false)
-        }} />
-        <div className="text-center mt-4">
-          <Button variant="outline" onClick={() => setShowConfig(false)}>
-            Cancel
-          </Button>
-        </div>
-      </div>
+        }}
+      />
     )
   }
 
@@ -452,6 +430,12 @@ function App() {
           onClose={() => {
             setShowJobDialog(false)
             setEditingJob(null)
+          }}
+          onManageConnections={() => {
+            // Allow jumping into Connections from inside the job form.
+            setShowJobDialog(false)
+            setEditingJob(null)
+            setShowConfig(true)
           }}
         />
       )}
