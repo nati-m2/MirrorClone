@@ -5,6 +5,7 @@ import BackupStatistics from './components/BackupStatistics'
 import JobDialog from './components/JobDialog'
 import ConfigSetup from './components/ConfigSetup'
 import RestoreWizard from './components/RestoreWizard'
+import RestoreSnapshots from './components/RestoreSnapshots'
 import Button from './components/ui/Button'
 import { 
   getStatus, 
@@ -29,6 +30,8 @@ function App() {
   const [jobProgress, setJobProgress] = useState({}) // { jobId: { stage, message, percent } }
   const [activeTab, setActiveTab] = useState('backup') // 'backup' | 'restore'
   const [showRestoreWizard, setShowRestoreWizard] = useState(false)
+  // When a snapshot card is clicked we open the wizard pre-populated with it.
+  const [restoreSnapshot, setRestoreSnapshot] = useState(null)
 
   // On mount: fire status + jobs + gdrive checks in PARALLEL for fastest paint.
   useEffect(() => {
@@ -285,8 +288,18 @@ function App() {
     )
   }
 
+  // Open the wizard with a specific snapshot pre-selected.
+  const openRestoreFor = (snap) => {
+    setRestoreSnapshot(snap)
+    setShowRestoreWizard(true)
+  }
+  const closeRestoreWizard = () => {
+    setShowRestoreWizard(false)
+    setRestoreSnapshot(null)
+  }
+
   // Floating-action handler depends on the active tab.
-  const fabAction = activeTab === 'backup' ? handleCreateJob : () => setShowRestoreWizard(true)
+  const fabAction = activeTab === 'backup' ? handleCreateJob : () => openRestoreFor(null)
   const fabLabel  = activeTab === 'backup' ? 'New Backup Job' : 'Open Restore Wizard'
 
   return (
@@ -417,22 +430,7 @@ function App() {
 
           {/* ── Restore tab ── */}
           {activeTab === 'restore' && (
-            <div className="max-w-2xl mx-auto text-center py-16">
-              <RotateCcw className="h-16 w-16 mx-auto text-muted-foreground mb-5" />
-              <h3 className="text-xl font-semibold mb-3">Restore Files</h3>
-              <p className="text-muted-foreground mb-8 max-w-md mx-auto">
-                Restore files from existing backups. Select a specific snapshot,
-                browse its contents, and restore selected files to any location.
-              </p>
-              <Button
-                size="lg"
-                onClick={() => setShowRestoreWizard(true)}
-                className="flex items-center gap-2 mx-auto"
-              >
-                <RotateCcw className="h-5 w-5" />
-                Launch Restore Wizard
-              </Button>
-            </div>
+            <RestoreSnapshots onRestore={openRestoreFor} />
           )}
         </main>
       </div>
@@ -459,7 +457,10 @@ function App() {
       )}
 
       {showRestoreWizard && (
-        <RestoreWizard onClose={() => setShowRestoreWizard(false)} />
+        <RestoreWizard
+          initialSnapshot={restoreSnapshot}
+          onClose={closeRestoreWizard}
+        />
       )}
     </div>
   )

@@ -566,9 +566,10 @@ const StepExecute = ({ snapshot, selectedItems, restoreAll, destination, passwor
 }
 
 // ─── Main Wizard ───────────────────────────────────────────────────────────────
-const RestoreWizard = ({ onClose }) => {
-  const [step, setStep] = useState(0)
-  const [snapshot, setSnapshot] = useState(null)
+const RestoreWizard = ({ onClose, initialSnapshot = null }) => {
+  // When called with a pre-selected snapshot, skip the selection step.
+  const [step, setStep] = useState(initialSnapshot ? 1 : 0)
+  const [snapshot, setSnapshot] = useState(initialSnapshot)
   const [selectedItems, setSelectedItems] = useState([])
   const [restoreAll, setRestoreAll] = useState(true)
   const [restoreSettings, setRestoreSettings] = useState(null)
@@ -616,7 +617,8 @@ const RestoreWizard = ({ onClose }) => {
               selectedItems={selectedItems}
               onSelectionChange={setSelectedItems}
               onNext={handleFilesNext}
-              onBack={() => setStep(0)}
+              // If wizard opened with a pre-selected snapshot, "Back" closes it.
+              onBack={initialSnapshot ? onClose : () => setStep(0)}
             />
           )}
 
