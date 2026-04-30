@@ -7,6 +7,10 @@ Backblaze B2, Dropbox, OneDrive, SFTP, WebDAV, local disks, and dozens more.
 ![license](https://img.shields.io/badge/license-MIT-blue.svg)
 ![stack](https://img.shields.io/badge/stack-FastAPI%20%2B%20React-informational)
 
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="MirrorClone dashboard with backup statistics and storage usage" width="900" />
+</p>
+
 ## Highlights
 
 - **Multiple connections, any provider.** Add as many cloud or storage
@@ -132,6 +136,42 @@ and cloud snapshots across all connections — as a unified grid with:
 The file browser can peek **inside remote ZIPs** without downloading them by
 reading only the archive's central directory via `rclone cat --offset --count`.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Connections</strong><br/>
+      <sub>All rclone remotes in one place — health pill, test, reconnect, delete.</sub><br/><br/>
+      <img src="docs/screenshots/connections.png" alt="Connections management screen" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Add Connection</strong><br/>
+      <sub>Pick from every rclone backend — popular ones first, all the rest below.</sub><br/><br/>
+      <img src="docs/screenshots/add-connection.png" alt="Provider picker for adding a new connection" />
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <strong>Google Drive — one-click OAuth</strong><br/>
+      <sub>Authorize with your account, no manual token editing.</sub><br/><br/>
+      <img src="docs/screenshots/google-drive.png" alt="Google Drive quick-setup dialog" />
+    </td>
+    <td width="50%" align="center">
+      <strong>Job editor</strong><br/>
+      <sub>Source, connection, schedule, ZIP + AES-256, retention — all in one form.</sub><br/><br/>
+      <img src="docs/screenshots/job-dialog.png" alt="Edit job dialog" />
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">
+      <strong>Restore</strong><br/>
+      <sub>Unified grid of every snapshot — local + cloud, encrypted, ZIP or folder, all searchable and filterable.</sub><br/><br/>
+      <img src="docs/screenshots/restore.png" alt="Restore tab listing all snapshots" width="900" />
+    </td>
+  </tr>
+</table>
+
 ## Tech stack
 
 - **Backend** — Python 3.11, FastAPI, APScheduler, rclone, 7-Zip
@@ -140,27 +180,6 @@ reading only the archive's central directory via `rclone cat --offset --count`.
 - **Storage glue** — `rclone config create` (any backend), per-provider OAuth
   for Google Drive
 
-## Project layout
-
-```
-app/              # FastAPI backend
-  main.py         # Routes (config / jobs / restore / SSE)
-  auth_manager.py # rclone.conf parsing + generic remote creation
-  job_engine.py   # rclone invocations, ZIP building, retention
-  scheduler.py    # APScheduler wrapper
-  self_backup.py  # Push rclone.conf + jobs.json to the primary remote
-  guardian.py     # SMTP alerts
-frontend/src/
-  App.jsx
-  components/
-    ConnectionsManager.jsx   # Manage remotes (add / test / reconnect / delete)
-    AddConnectionDialog.jsx  # Dynamic form built from rclone providers JSON
-    ReconnectDialog.jsx      # Re-auth an existing OAuth remote in place
-    JobDialog.jsx            # Create / edit a job (connection dropdown)
-    JobCard.jsx              # Job card with offline / missing banners
-    RestoreSnapshots.jsx     # Grid of every snapshot
-    RestoreWizard.jsx        # 4-step restore flow
-```
 
 ## License
 
