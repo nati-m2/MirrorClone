@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, RefreshCw, Settings, Database, Cloud, CloudOff, RotateCcw, HardDrive } from 'lucide-react'
-import StatusBar from './components/StatusBar'
+import { Plus, RefreshCw, Database, Cloud, CloudOff, RotateCcw, HardDrive, Settings as SettingsIcon } from 'lucide-react'
 import JobCard from './components/JobCard'
+import BackupStatistics from './components/BackupStatistics'
 import JobDialog from './components/JobDialog'
 import ConfigSetup from './components/ConfigSetup'
 import RestoreWizard from './components/RestoreWizard'
@@ -285,103 +285,71 @@ function App() {
     )
   }
 
+  // Floating-action handler depends on the active tab.
+  const fabAction = activeTab === 'backup' ? handleCreateJob : () => setShowRestoreWizard(true)
+  const fabLabel  = activeTab === 'backup' ? 'New Backup Job' : 'Open Restore Wizard'
+
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <div className="border-b border-border bg-card px-6 py-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" className="h-9 w-9 flex-shrink-0">
-              <rect width="64" height="64" rx="14" fill="#2563eb"/>
-              <path d="M14 24 C14 20 18 17 22 17 L36 17 L36 13 L50 22 L36 31 L36 27 L22 27 C20 27 19 26 19 24 Z" fill="white"/>
-              <path d="M50 40 C50 44 46 47 42 47 L28 47 L28 51 L14 42 L28 33 L28 37 L42 37 C44 37 45 38 45 40 Z" fill="white" opacity="0.85"/>
-            </svg>
-            <div>
-              <h1 className="text-2xl font-bold">MirrorClone</h1>
-              <p className="text-sm text-muted-foreground">
-                Reliable Rclone Mirror Wrapper
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            {/* Google Drive Status */}
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-muted">
-              {gdriveStatus.checking ? (
-                <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
-              ) : gdriveStatus.connected ? (
-                <>
-                  <Cloud className="h-4 w-4 text-green-500" />
-                  <span className="text-sm text-green-500">Connected</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleDisconnect}
-                    className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive"
-                  >
-                    Disconnect
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <CloudOff className="h-4 w-4 text-destructive" />
-                  <span className="text-sm text-destructive">Disconnected</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleReconnect}
-                    className="h-6 px-2 text-xs text-primary"
-                  >
-                    Connect
-                  </Button>
-                </>
-              )}
-            </div>
-
-            {activeTab === 'backup' && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={fetchJobs}
-                  className="flex items-center gap-1"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  Refresh
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={handleCreateJob}
-                  className="flex items-center gap-1"
-                >
-                  <Plus className="h-4 w-4" />
-                  New Job
-                </Button>
-              </>
-            )}
-
-            {activeTab === 'restore' && (
-              <Button
-                size="sm"
-                onClick={() => setShowRestoreWizard(true)}
-                className="flex items-center gap-2"
-              >
-                <RotateCcw className="h-4 w-4" />
-                Restore Wizard
-              </Button>
-            )}
-          </div>
+      {/* Slim top bar (HA-style): title left, actions right. */}
+      <header className="px-6 py-3 flex items-center justify-between border-b border-border">
+        <div className="flex items-center gap-3">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" className="h-7 w-7 flex-shrink-0">
+            <rect width="64" height="64" rx="14" fill="hsl(var(--primary))"/>
+            <path d="M14 24 C14 20 18 17 22 17 L36 17 L36 13 L50 22 L36 31 L36 27 L22 27 C20 27 19 26 19 24 Z" fill="white"/>
+            <path d="M50 40 C50 44 46 47 42 47 L28 47 L28 51 L14 42 L28 33 L28 37 L42 37 C44 37 45 38 45 40 Z" fill="white" opacity="0.85"/>
+          </svg>
+          <h1 className="text-lg font-medium">Backups</h1>
         </div>
-      </div>
 
-      <StatusBar />
+        <div className="flex items-center gap-2">
+          {/* Google Drive pill (compact) */}
+          <button
+            onClick={gdriveStatus.connected ? handleDisconnect : handleReconnect}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs hover:bg-muted transition-colors"
+            title={gdriveStatus.connected ? 'Disconnect Google Drive' : 'Connect Google Drive'}
+          >
+            {gdriveStatus.checking ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+            ) : gdriveStatus.connected ? (
+              <Cloud className="h-3.5 w-3.5 text-primary" />
+            ) : (
+              <CloudOff className="h-3.5 w-3.5 text-destructive" />
+            )}
+            <span className={gdriveStatus.connected ? 'text-foreground' : 'text-destructive'}>
+              {gdriveStatus.checking ? 'Checking…' : gdriveStatus.connected ? 'Drive' : 'Drive offline'}
+            </span>
+          </button>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={fetchJobs}
+            className="h-8 px-2 flex items-center gap-1.5"
+            title="Refresh"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowConfig(true)}
+            className="h-8 px-2 flex items-center gap-1.5"
+            title="Settings"
+          >
+            <SettingsIcon className="h-4 w-4" />
+          </Button>
+        </div>
+      </header>
 
       {/* Tabs */}
-      <div className="border-b border-border bg-card">
+      <div className="border-b border-border">
         <div className="container mx-auto px-6">
           <div className="flex gap-0">
             <button
               onClick={() => setActiveTab('backup')}
-              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors
                 ${activeTab === 'backup'
                   ? 'border-primary text-primary'
                   : 'border-transparent text-muted-foreground hover:text-foreground'}`}
@@ -397,7 +365,7 @@ function App() {
             </button>
             <button
               onClick={() => setActiveTab('restore')}
-              className={`flex items-center gap-2 px-5 py-3 text-sm font-medium border-b-2 transition-colors
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors
                 ${activeTab === 'restore'
                   ? 'border-primary text-primary'
                   : 'border-transparent text-muted-foreground hover:text-foreground'}`}
@@ -409,60 +377,75 @@ function App() {
         </div>
       </div>
 
-      {/* Tab content */}
-      <div className="container mx-auto px-6 py-8">
-
-        {/* ── Backup tab ── */}
+      {/* Body: sidebar + content (HA "Backup Statistics" layout). */}
+      <div className="container mx-auto px-6 py-8 flex flex-col lg:flex-row gap-8">
         {activeTab === 'backup' && (
-          jobs.length === 0 ? (
-            <div className="text-center py-12">
-              <Database className="h-16 w-16 mx-auto text-muted-foreground mb-4" />
-              <h3 className="text-lg font-semibold mb-2">No backup jobs yet</h3>
-              <p className="text-muted-foreground mb-6">
-                Create your first backup job to get started
+          <BackupStatistics jobs={jobs} gdriveStatus={gdriveStatus} />
+        )}
+
+        <main className="flex-1 min-w-0">
+          {/* ── Backup tab ── */}
+          {activeTab === 'backup' && (
+            jobs.length === 0 ? (
+              <div className="text-center py-16 rounded-lg border border-dashed border-border">
+                <Database className="h-14 w-14 mx-auto text-muted-foreground mb-4" />
+                <h3 className="text-lg font-semibold mb-2">No backup jobs yet</h3>
+                <p className="text-muted-foreground mb-6">
+                  Create your first backup job to get started
+                </p>
+                <Button onClick={handleCreateJob} className="flex items-center gap-2 mx-auto">
+                  <Plus className="h-4 w-4" />
+                  Create First Job
+                </Button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {jobs.map((job) => (
+                  <JobCard
+                    key={job.id}
+                    job={job}
+                    progress={jobProgress[job.id]}
+                    onRun={handleRunJob}
+                    onStop={handleStopJob}
+                    onEdit={handleEditJob}
+                    onDelete={handleDeleteJob}
+                  />
+                ))}
+              </div>
+            )
+          )}
+
+          {/* ── Restore tab ── */}
+          {activeTab === 'restore' && (
+            <div className="max-w-2xl mx-auto text-center py-16">
+              <RotateCcw className="h-16 w-16 mx-auto text-muted-foreground mb-5" />
+              <h3 className="text-xl font-semibold mb-3">Restore Files</h3>
+              <p className="text-muted-foreground mb-8 max-w-md mx-auto">
+                Restore files from existing backups. Select a specific snapshot,
+                browse its contents, and restore selected files to any location.
               </p>
-              <Button onClick={handleCreateJob} className="flex items-center gap-2 mx-auto">
-                <Plus className="h-4 w-4" />
-                Create First Job
+              <Button
+                size="lg"
+                onClick={() => setShowRestoreWizard(true)}
+                className="flex items-center gap-2 mx-auto"
+              >
+                <RotateCcw className="h-5 w-5" />
+                Launch Restore Wizard
               </Button>
             </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {jobs.map((job) => (
-                <JobCard
-                  key={job.id}
-                  job={job}
-                  progress={jobProgress[job.id]}
-                  onRun={handleRunJob}
-                  onStop={handleStopJob}
-                  onEdit={handleEditJob}
-                  onDelete={handleDeleteJob}
-                />
-              ))}
-            </div>
-          )
-        )}
-
-        {/* ── Restore tab ── */}
-        {activeTab === 'restore' && (
-          <div className="max-w-2xl mx-auto text-center py-16">
-            <RotateCcw className="h-16 w-16 mx-auto text-muted-foreground mb-5" />
-            <h3 className="text-xl font-semibold mb-3">Restore Files</h3>
-            <p className="text-muted-foreground mb-8 max-w-md mx-auto">
-              Restore files from existing backups. Select a specific snapshot,
-              browse its contents, and restore selected files to any location.
-            </p>
-            <Button
-              size="lg"
-              onClick={() => setShowRestoreWizard(true)}
-              className="flex items-center gap-2 mx-auto"
-            >
-              <RotateCcw className="h-5 w-5" />
-              Launch Restore Wizard
-            </Button>
-          </div>
-        )}
+          )}
+        </main>
       </div>
+
+      {/* Floating Action Button — mirrors the blue "+" in the HA add-on. */}
+      <button
+        onClick={fabAction}
+        title={fabLabel}
+        aria-label={fabLabel}
+        className="fixed bottom-6 right-6 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:brightness-110 active:scale-95 transition flex items-center justify-center z-40"
+      >
+        <Plus className="h-6 w-6" />
+      </button>
 
       {showJobDialog && (
         <JobDialog
