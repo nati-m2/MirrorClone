@@ -1,22 +1,23 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, RefreshCw, Database, Cloud, CloudOff, RotateCcw, HardDrive, Settings as SettingsIcon } from 'lucide-react'
+import { Plus, RefreshCw, Database, RotateCcw, HardDrive, Settings as SettingsIcon } from 'lucide-react'
 import JobCard from './components/JobCard'
 import BackupStatistics from './components/BackupStatistics'
 import JobDialog from './components/JobDialog'
 import ConnectionsManager from './components/ConnectionsManager'
 import RestoreWizard from './components/RestoreWizard'
 import RestoreSnapshots from './components/RestoreSnapshots'
+import ReconnectDialog from './components/ReconnectDialog'
 import Button from './components/ui/Button'
-import { 
-  getStatus, 
-  getJobs, 
-  createJob, 
-  updateJob, 
-  deleteJob, 
-  runJobNow, 
+import {
+  getStatus,
+  getJobs,
+  createJob,
+  updateJob,
+  deleteJob,
+  runJobNow,
   stopJob,
-  getGdriveStatus,
-  disconnectGdrive
+  getRemotesDetailed,
+  testRemote,
 } from './lib/api'
 
 function App() {
@@ -25,7 +26,6 @@ function App() {
   const [configExists, setConfigExists] = useState(false)
   const [showJobDialog, setShowJobDialog] = useState(false)
   const [editingJob, setEditingJob] = useState(null)
-  const [gdriveStatus, setGdriveStatus] = useState({ connected: false, checking: true })
   const [showConfig, setShowConfig] = useState(false)
   const [jobProgress, setJobProgress] = useState({}) // { jobId: { stage, message, percent } }
   const [activeTab, setActiveTab] = useState('backup') // 'backup' | 'restore'
@@ -33,14 +33,59 @@ function App() {
   // When a snapshot card is clicked we open the wizard pre-populated with it.
   const [restoreSnapshot, setRestoreSnapshot] = useState(null)
 
-  // On mount: fire status + jobs + gdrive checks in PARALLEL for fastest paint.
+  // Map of remote-name → { state: 'ok'|'fail'|'testing', message, type } used
+  // by JobCard banners and BackupStatistics. Populated by `refreshRemoteStatuses`.
+  const [remoteStatuses, setRemoteStatuses] = useState({})
+  // Target of the Reconnect modal (triggered from a JobCard).
+  const [reconnectTarget, setReconnectTarget] = useState(null) // { name, type }
+
+  // Refresh the list of rclone remotes and test each one in parallel. This is
+  // called on mount, when the user reopens the app from Settings, and after
+  // a successful reconnect — NOT on a timer, since rclone itself maintains
+  // the refresh token; we only hit the network when the user needs to know.
+  const refreshRemoteStatuses = useCallback(async () => {
+    try {
+      const res = await getRemotesDetailed()
+      const list = res.data || []
+      // Seed statuses as "testing" for instant UI feedback.
+      setRemoteStatuses(prev => {
+        const next = {}
+        for (const r of list) {
+          next[r.name] = prev[r.name] || { state: 'testing', message: 'Testing…', type: r.type }
+          next[r.name].type = r.type
+        }
+        return next
+      })
+      await Promise.all(list.map(async (r) => {
+        try {
+          const tr = await testRemote(r.name)
+          setRemoteStatuses(prev => ({
+            ...prev,
+            [r.name]: {
+              type: r.type,
+              state: tr.data.success ? 'ok' : 'fail',
+              message: tr.data.message || (tr.data.success ? 'Connected' : 'Failed'),
+            },
+          }))
+        } catch (e) {
+          setRemoteStatuses(prev => ({
+            ...prev,
+            [r.name]: { type: r.type, state: 'fail', message: e.response?.data?.detail || e.message },
+          }))
+        }
+      }))
+    } catch {
+      // No config / offline server — leave statuses empty.
+    }
+  }, [])
+
+  // On mount: fire status + jobs + remote-status checks in PARALLEL.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const statusPromise = getStatus()
-        const jobsPromise = getJobs().catch(() => null)        // may 401 before config
-        const gdrivePromise = getGdriveStatus().catch(() => null)
+        const jobsPromise = getJobs().catch(() => null) // may 401 before config
 
         const statusRes = await statusPromise
         if (cancelled) return
@@ -48,43 +93,17 @@ function App() {
         setConfigExists(cfg)
         setLoading(false)
 
-        const [jobsRes, gdriveRes] = await Promise.all([jobsPromise, gdrivePromise])
+        const jobsRes = await jobsPromise
         if (cancelled) return
         if (cfg && jobsRes?.data) setJobs(jobsRes.data)
-        if (gdriveRes?.data) setGdriveStatus({ ...gdriveRes.data, checking: false })
-        else setGdriveStatus({ connected: false, checking: false })
+        if (cfg) refreshRemoteStatuses()
       } catch (e) {
         console.error('Initial load failed:', e)
         setLoading(false)
       }
     })()
     return () => { cancelled = true }
-  }, [])
-
-  const checkGdriveStatus = async () => {
-    try {
-      const response = await getGdriveStatus()
-      setGdriveStatus({ ...response.data, checking: false })
-    } catch (error) {
-      setGdriveStatus({ connected: false, checking: false, error: 'Failed to check' })
-    }
-  }
-
-  const handleDisconnect = async () => {
-    if (!window.confirm('Are you sure you want to disconnect Google Drive? You will need to reconnect to run backups.')) return
-    try {
-      await disconnectGdrive()
-      setGdriveStatus({ connected: false, checking: false })
-      // Refresh config status
-      await checkConfig()
-    } catch (error) {
-      alert('Failed to disconnect: ' + error.message)
-    }
-  }
-
-  const handleReconnect = () => {
-    setShowConfig(true)
-  }
+  }, [refreshRemoteStatuses])
 
   // Refs avoid stale closures inside the SSE handler.
   const fetchingRef = useRef(false)
@@ -247,7 +266,7 @@ function App() {
       <ConnectionsManager
         onClose={() => {
           checkConfig()
-          checkGdriveStatus()
+          refreshRemoteStatuses()
         }}
       />
     )
@@ -259,7 +278,7 @@ function App() {
       <ConnectionsManager
         onClose={() => {
           checkConfig()
-          checkGdriveStatus()
+          refreshRemoteStatuses()
           setShowConfig(false)
         }}
       />
@@ -294,28 +313,10 @@ function App() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Google Drive pill (compact) */}
-          <button
-            onClick={gdriveStatus.connected ? handleDisconnect : handleReconnect}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs hover:bg-muted transition-colors"
-            title={gdriveStatus.connected ? 'Disconnect Google Drive' : 'Connect Google Drive'}
-          >
-            {gdriveStatus.checking ? (
-              <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-            ) : gdriveStatus.connected ? (
-              <Cloud className="h-3.5 w-3.5 text-primary" />
-            ) : (
-              <CloudOff className="h-3.5 w-3.5 text-destructive" />
-            )}
-            <span className={gdriveStatus.connected ? 'text-foreground' : 'text-destructive'}>
-              {gdriveStatus.checking ? 'Checking…' : gdriveStatus.connected ? 'Drive' : 'Drive offline'}
-            </span>
-          </button>
-
           <Button
             variant="ghost"
             size="sm"
-            onClick={fetchJobs}
+            onClick={() => { fetchJobs(); refreshRemoteStatuses(); }}
             className="h-8 px-2 flex items-center gap-1.5"
             title="Refresh"
           >
@@ -371,7 +372,7 @@ function App() {
       {/* Body: sidebar + content (HA "Backup Statistics" layout). */}
       <div className="container mx-auto px-6 py-8 flex flex-col lg:flex-row gap-8">
         {activeTab === 'backup' && (
-          <BackupStatistics jobs={jobs} gdriveStatus={gdriveStatus} />
+          <BackupStatistics jobs={jobs} remoteStatuses={remoteStatuses} />
         )}
 
         <main className="flex-1 min-w-0">
@@ -391,17 +392,28 @@ function App() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {jobs.map((job) => (
-                  <JobCard
-                    key={job.id}
-                    job={job}
-                    progress={jobProgress[job.id]}
-                    onRun={handleRunJob}
-                    onStop={handleStopJob}
-                    onEdit={handleEditJob}
-                    onDelete={handleDeleteJob}
-                  />
-                ))}
+                {jobs.map((job) => {
+                  // Derive the remote name directly from the destination so
+                  // we don't have to duplicate parsing logic here.
+                  const remoteName = (job.destination || '').split(':')[0]
+                  const connStatus = remoteName ? remoteStatuses[remoteName] : undefined
+                  return (
+                    <JobCard
+                      key={job.id}
+                      job={job}
+                      progress={jobProgress[job.id]}
+                      connectionStatus={connStatus}
+                      onRun={handleRunJob}
+                      onStop={handleStopJob}
+                      onEdit={handleEditJob}
+                      onDelete={handleDeleteJob}
+                      onReconnect={(name) => setReconnectTarget({
+                        name,
+                        type: remoteStatuses[name]?.type,
+                      })}
+                    />
+                  )
+                })}
               </div>
             )
           )}
@@ -444,6 +456,16 @@ function App() {
         <RestoreWizard
           initialSnapshot={restoreSnapshot}
           onClose={closeRestoreWizard}
+        />
+      )}
+
+      {reconnectTarget && (
+        <ReconnectDialog
+          remoteName={reconnectTarget.name}
+          remoteType={reconnectTarget.type}
+          onClose={() => setReconnectTarget(null)}
+          onDone={() => { setReconnectTarget(null); refreshRemoteStatuses(); }}
+          onOpenConnections={() => setShowConfig(true)}
         />
       )}
     </div>

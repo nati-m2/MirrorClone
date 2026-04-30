@@ -1,11 +1,18 @@
 import React from 'react'
 import {
   Play, Square, Trash2, Edit, FileArchive,
-  CheckCircle, XCircle, Loader
+  CheckCircle, XCircle, Loader, Link2, AlertTriangle
 } from 'lucide-react'
 import Button from './ui/Button'
 import { formatRelativeTime } from '../lib/utils'
 import cronstrue from 'cronstrue'
+
+// Extract the remote name from a destination like "gdrive:MirrorCloneBackups/foo".
+const parseRemoteName = (destination) => {
+  if (!destination) return ''
+  const idx = destination.indexOf(':')
+  return idx === -1 ? '' : destination.slice(0, idx)
+}
 
 /**
  * Compact backup card styled after sabeechen/hassio-google-drive-backup:
@@ -16,7 +23,10 @@ import cronstrue from 'cronstrue'
  *  - relative timestamp at the bottom
  *  - action buttons revealed on hover
  */
-const JobCard = ({ job, progress, onRun, onStop, onEdit, onDelete }) => {
+const JobCard = ({ job, progress, connectionStatus, onRun, onStop, onEdit, onDelete, onReconnect }) => {
+  // Flag used to show a red banner + Reconnect button on this card.
+  const remoteName = parseRemoteName(job.destination)
+  const connectionOffline = connectionStatus && connectionStatus.state === 'fail'
   // Resolve schedule description (cron → human-readable).
   const getCronDescription = () => {
     try {
@@ -128,6 +138,33 @@ const JobCard = ({ job, progress, onRun, onStop, onEdit, onDelete }) => {
           {job.last_error && (
             <div className="mt-2 text-xs text-destructive font-mono truncate" title={job.last_error}>
               {job.last_error}
+            </div>
+          )}
+
+          {/* Connection-offline banner. Appears when the remote this job
+              depends on fails its health check. Gives the user a one-click
+              Reconnect path without hunting through the settings. */}
+          {connectionOffline && (
+            <div className="mt-2 flex items-start gap-2 p-2 rounded-md border border-destructive/40 bg-destructive/10">
+              <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0 text-xs">
+                <div className="font-medium text-destructive">
+                  Connection "{remoteName}" offline
+                </div>
+                <div className="text-muted-foreground truncate" title={connectionStatus.message}>
+                  {connectionStatus.message || 'Cannot reach this remote'}
+                </div>
+              </div>
+              {onReconnect && (
+                <Button
+                  size="sm"
+                  onClick={() => onReconnect(remoteName)}
+                  className="h-7 px-2 text-xs gap-1.5 flex-shrink-0"
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                  Reconnect
+                </Button>
+              )}
             </div>
           )}
         </div>

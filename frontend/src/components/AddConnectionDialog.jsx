@@ -110,8 +110,9 @@ const ProviderTile = ({ provider, onPick }) => (
 )
 
 // Step 2a: Google Drive OAuth flow (special case — keep "Quick setup" UX)
-const GoogleDriveStep = ({ onCreated, onCancel }) => {
-  const [name, setName] = useState('gdrive')
+// Exported so the ReconnectDialog can reuse the exact same UX.
+export const GoogleDriveStep = ({ onCreated, onCancel, initialName = 'gdrive', lockName = false }) => {
+  const [name, setName] = useState(initialName)
   const [stage, setStage] = useState('idle') // idle | connecting | code | submitting | done | error
   const [authUrl, setAuthUrl] = useState('')
   const [authCode, setAuthCode] = useState('')
@@ -162,11 +163,14 @@ const GoogleDriveStep = ({ onCreated, onCancel }) => {
           value={name}
           onChange={e => setName(e.target.value.replace(/[^A-Za-z0-9_\- ]/g, ''))}
           placeholder="gdrive-personal"
+          disabled={lockName}
           className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm
-            focus:outline-none focus:ring-2 focus:ring-primary/50"
+            focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-60"
         />
         <p className="text-xs text-muted-foreground mt-1">
-          A short identifier — letters, digits, dashes and spaces only.
+          {lockName
+            ? 'Reconnecting will refresh the authorization token for this connection.'
+            : 'A short identifier — letters, digits, dashes and spaces only.'}
         </p>
       </div>
 
@@ -237,7 +241,8 @@ const GoogleDriveStep = ({ onCreated, onCancel }) => {
 
       <div className="pt-2 border-t border-border">
         <Button variant="ghost" onClick={onCancel} className="gap-1.5">
-          <ChevronLeft className="h-4 w-4" /> Pick another provider
+          <ChevronLeft className="h-4 w-4" />
+          {lockName ? 'Cancel' : 'Pick another provider'}
         </Button>
       </div>
     </div>

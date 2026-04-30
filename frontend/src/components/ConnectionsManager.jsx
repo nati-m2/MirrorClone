@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react'
 import {
-  Plus, Trash2, RefreshCw, CheckCircle2, XCircle, Loader2,
+  Plus, Trash2, RefreshCw, CheckCircle2, XCircle, Loader2, Link2,
   Cloud, HardDrive, Server, Database, AlertTriangle, Upload, Download
 } from 'lucide-react'
 import Button from './ui/Button'
 import AddConnectionDialog from './AddConnectionDialog'
+import ReconnectDialog from './ReconnectDialog'
 import {
   getRemotesDetailed, deleteRemote, testRemote, uploadConfig, downloadConfig
 } from '../lib/api'
@@ -29,60 +30,100 @@ const ProviderIcon = ({ type, className = 'h-5 w-5' }) => {
   return <Icon className={className} />
 }
 
-const ConnectionCard = ({ remote, onDelete, onTest, testStatus }) => (
-  <div className="rounded-lg bg-card border border-border p-4 flex items-start gap-3">
-    {/* Icon */}
-    <div className="flex-shrink-0 mt-0.5 h-10 w-10 rounded bg-background/60 border border-border flex items-center justify-center">
-      <ProviderIcon type={remote.type} className="h-5 w-5 text-primary" />
-    </div>
+// Status dot + label shown inline on each card.
+const StatusPill = ({ state, message }) => {
+  const palette = state === 'ok' ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/30'
+    : state === 'fail' ? 'text-destructive bg-destructive/10 border-destructive/40'
+    : 'text-muted-foreground bg-muted border-border'
+  const label = state === 'ok' ? 'Connected'
+    : state === 'fail' ? 'Disconnected'
+    : state === 'testing' ? 'Testing…'
+    : 'Unknown'
+  return (
+    <span
+      title={message}
+      className={`inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border ${palette}`}
+    >
+      {state === 'testing'
+        ? <Loader2 className="h-3 w-3 animate-spin" />
+        : <span className={`h-1.5 w-1.5 rounded-full ${
+            state === 'ok' ? 'bg-emerald-400'
+            : state === 'fail' ? 'bg-destructive'
+            : 'bg-muted-foreground'
+          }`} />}
+      {label}
+    </span>
+  )
+}
 
-    {/* Main */}
-    <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-2">
-        <h3 className="font-medium truncate">{remote.name}</h3>
-        <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-          {remote.type || 'unknown'}
-        </span>
+const ConnectionCard = ({ remote, onDelete, onTest, onReconnect, testStatus }) => {
+  // OAuth-backed remotes (currently Google Drive) can be re-authorized in-app.
+  // For other providers "Reconnect" is really a re-test; an offline S3/SFTP
+  // needs its credentials fixed manually, so the button is still useful.
+  const canReauth = remote.type === 'drive'
+  const offline = testStatus?.state === 'fail'
+
+  return (
+    <div className="rounded-lg bg-card border border-border p-4 flex items-start gap-3">
+      {/* Icon */}
+      <div className="flex-shrink-0 mt-0.5 h-10 w-10 rounded bg-background/60 border border-border flex items-center justify-center">
+        <ProviderIcon type={remote.type} className="h-5 w-5 text-primary" />
       </div>
 
-      {/* Test status */}
-      {testStatus && (
-        <div className={`text-xs mt-2 flex items-start gap-1.5 ${
-          testStatus.state === 'ok' ? 'text-emerald-400'
-          : testStatus.state === 'fail' ? 'text-destructive'
-          : 'text-muted-foreground'
-        }`}>
-          {testStatus.state === 'ok' && <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
-          {testStatus.state === 'fail' && <XCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />}
-          {testStatus.state === 'testing' && <Loader2 className="h-3.5 w-3.5 flex-shrink-0 mt-0.5 animate-spin" />}
-          <span className="truncate" title={testStatus.message}>{testStatus.message}</span>
+      {/* Main */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h3 className="font-medium truncate">{remote.name}</h3>
+          <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+            {remote.type || 'unknown'}
+          </span>
+          <StatusPill state={testStatus?.state || 'unknown'} message={testStatus?.message} />
         </div>
-      )}
-    </div>
 
-    {/* Actions */}
-    <div className="flex items-center gap-1 flex-shrink-0">
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => onTest(remote.name)}
-        className="h-8 px-2 flex items-center gap-1.5"
-        title="Test connection"
-      >
-        <RefreshCw className="h-4 w-4" />
-      </Button>
-      <Button
-        size="sm"
-        variant="ghost"
-        onClick={() => onDelete(remote.name)}
-        className="h-8 px-2 flex items-center gap-1.5 text-destructive hover:text-destructive"
-        title="Delete connection"
-      >
-        <Trash2 className="h-4 w-4" />
-      </Button>
+        {testStatus?.message && (
+          <div className={`text-xs mt-1.5 truncate ${
+            testStatus.state === 'fail' ? 'text-destructive' : 'text-muted-foreground'
+          }`} title={testStatus.message}>
+            {testStatus.message}
+          </div>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {offline && canReauth && (
+          <Button
+            size="sm"
+            onClick={() => onReconnect(remote)}
+            className="h-8 px-2 flex items-center gap-1.5 text-xs"
+            title="Re-authorize this connection"
+          >
+            <Link2 className="h-3.5 w-3.5" />
+            Reconnect
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onTest(remote.name)}
+          className="h-8 px-2 flex items-center gap-1.5"
+          title="Test connection"
+        >
+          <RefreshCw className="h-4 w-4" />
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onDelete(remote.name)}
+          className="h-8 px-2 flex items-center gap-1.5 text-destructive hover:text-destructive"
+          title="Delete connection"
+        >
+          <Trash2 className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
-  </div>
-)
+  )
+}
 
 const ConnectionsManager = ({ onClose }) => {
   const [remotes, setRemotes] = useState([])
@@ -91,22 +132,9 @@ const ConnectionsManager = ({ onClose }) => {
   const [showAdd, setShowAdd] = useState(false)
   const [tests, setTests] = useState({}) // { name: { state, message } }
   const [busy, setBusy] = useState(false)
+  const [reconnectTarget, setReconnectTarget] = useState(null) // remote object
 
-  const refresh = async () => {
-    setLoading(true); setError('')
-    try {
-      const res = await getRemotesDetailed()
-      setRemotes(res.data || [])
-    } catch (e) {
-      setError(e.response?.data?.detail || e.message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => { refresh() }, [])
-
-  const handleTest = async (name) => {
+  const runTest = async (name) => {
     setTests(prev => ({ ...prev, [name]: { state: 'testing', message: 'Testing…' } }))
     try {
       const res = await testRemote(name)
@@ -124,6 +152,25 @@ const ConnectionsManager = ({ onClose }) => {
       }))
     }
   }
+
+  const refresh = async () => {
+    setLoading(true); setError('')
+    try {
+      const res = await getRemotesDetailed()
+      const list = res.data || []
+      setRemotes(list)
+      // Auto-test every remote in parallel so users see status without a click.
+      list.forEach(r => runTest(r.name))
+    } catch (e) {
+      setError(e.response?.data?.detail || e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { refresh() }, [])
+
+  const handleTest = (name) => runTest(name)
 
   const handleDelete = async (name) => {
     if (!window.confirm(`Delete connection "${name}"? Jobs using it will stop working.`)) return
@@ -234,6 +281,7 @@ const ConnectionsManager = ({ onClose }) => {
                 remote={r}
                 onTest={handleTest}
                 onDelete={handleDelete}
+                onReconnect={setReconnectTarget}
                 testStatus={tests[r.name]}
               />
             ))}
@@ -267,6 +315,15 @@ const ConnectionsManager = ({ onClose }) => {
         <AddConnectionDialog
           onClose={() => setShowAdd(false)}
           onCreated={() => refresh()}
+        />
+      )}
+
+      {reconnectTarget && (
+        <ReconnectDialog
+          remoteName={reconnectTarget.name}
+          remoteType={reconnectTarget.type}
+          onClose={() => setReconnectTarget(null)}
+          onDone={() => { setReconnectTarget(null); refresh() }}
         />
       )}
     </div>

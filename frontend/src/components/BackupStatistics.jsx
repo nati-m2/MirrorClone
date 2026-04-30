@@ -8,7 +8,7 @@ import { formatRelativeTime } from '../lib/utils'
  * sabeechen/hassio-google-drive-backup. Aggregates info from the loaded jobs
  * (count + last/next run) and the global /api/status endpoint.
  */
-const BackupStatistics = ({ jobs, gdriveStatus }) => {
+const BackupStatistics = ({ jobs, remoteStatuses = {} }) => {
   const [status, setStatus] = useState(null)
 
   useEffect(() => {
@@ -57,26 +57,36 @@ const BackupStatistics = ({ jobs, gdriveStatus }) => {
             </div>
           </div>
 
-          {/* Google Drive */}
-          <div className="flex items-start gap-3">
-            <Cloud className={`h-5 w-5 mt-0.5 flex-shrink-0 ${
-              gdriveStatus.connected ? 'text-primary' : 'text-muted-foreground'
-            }`} />
-            <div>
-              <div className="font-medium">
-                {gdriveStatus.checking
-                  ? 'Checking Google Drive…'
-                  : gdriveStatus.connected
-                    ? 'Connected to Google Drive'
-                    : 'Google Drive disconnected'}
-              </div>
-              {gdriveStatus.email && (
-                <div className="text-xs text-muted-foreground mt-0.5 break-all">
-                  {gdriveStatus.email}
+          {/* Connections summary: aggregated online/offline counts across all
+              configured remotes. Replaces the old Google-Drive-only pill. */}
+          {(() => {
+            const entries = Object.values(remoteStatuses || {})
+            const total = entries.length
+            const online = entries.filter(e => e.state === 'ok').length
+            const offline = entries.filter(e => e.state === 'fail').length
+            const allOnline = total > 0 && online === total
+            return (
+              <div className="flex items-start gap-3">
+                <Cloud className={`h-5 w-5 mt-0.5 flex-shrink-0 ${
+                  allOnline ? 'text-primary' : offline > 0 ? 'text-destructive' : 'text-muted-foreground'
+                }`} />
+                <div>
+                  <div className="font-medium">
+                    {total === 0
+                      ? 'No connections configured'
+                      : allOnline
+                        ? `${total} ${total === 1 ? 'connection' : 'connections'} online`
+                        : `${online}/${total} connections online`}
+                  </div>
+                  {offline > 0 && (
+                    <div className="text-xs text-destructive mt-0.5">
+                      {offline} offline — reconnect from Settings
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          </div>
+              </div>
+            )
+          })()}
         </div>
       </div>
 
