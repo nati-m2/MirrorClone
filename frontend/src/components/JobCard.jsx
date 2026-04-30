@@ -1,7 +1,7 @@
 import React from 'react'
 import {
   Play, Square, Trash2, Edit, FileArchive,
-  CheckCircle, XCircle, Loader, Link2, AlertTriangle
+  CheckCircle, XCircle, Loader, Link2, AlertTriangle, Unplug, Settings as SettingsIcon
 } from 'lucide-react'
 import Button from './ui/Button'
 import { formatRelativeTime } from '../lib/utils'
@@ -23,7 +23,10 @@ const parseRemoteName = (destination) => {
  *  - relative timestamp at the bottom
  *  - action buttons revealed on hover
  */
-const JobCard = ({ job, progress, connectionStatus, onRun, onStop, onEdit, onDelete, onReconnect }) => {
+const JobCard = ({
+  job, progress, connectionStatus, connectionMissing,
+  onRun, onStop, onEdit, onDelete, onReconnect, onManageConnections,
+}) => {
   // Flag used to show a red banner + Reconnect button on this card.
   const remoteName = parseRemoteName(job.destination)
   const connectionOffline = connectionStatus && connectionStatus.state === 'fail'
@@ -77,11 +80,31 @@ const JobCard = ({ job, progress, connectionStatus, onRun, onStop, onEdit, onDel
         {/* Main column */}
         <div className="flex-1 min-w-0">
           <div className="flex items-start justify-between gap-2">
-            <h3 className="font-medium truncate" title={job.name}>
-              {job.name}
+            <h3 className="font-medium truncate flex items-center gap-2" title={job.name}>
+              <span className="truncate">{job.name}</span>
               {!job.enabled && (
-                <span className="ml-2 text-xs px-1.5 py-0.5 rounded border border-border text-muted-foreground align-middle">
+                <span className="text-xs px-1.5 py-0.5 rounded border border-border text-muted-foreground align-middle flex-shrink-0">
                   Disabled
+                </span>
+              )}
+              {/* Small inline badge if the underlying connection is missing
+                  or offline — visible even when the card is collapsed. */}
+              {connectionMissing && (
+                <span
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-destructive/15 text-destructive border border-destructive/40 flex items-center gap-1 flex-shrink-0"
+                  title={`Connection "${remoteName}" is not configured`}
+                >
+                  <Unplug className="h-3 w-3" />
+                  No connection
+                </span>
+              )}
+              {!connectionMissing && connectionOffline && (
+                <span
+                  className="text-[10px] px-1.5 py-0.5 rounded bg-destructive/15 text-destructive border border-destructive/40 flex items-center gap-1 flex-shrink-0"
+                  title={connectionStatus?.message || 'Connection offline'}
+                >
+                  <AlertTriangle className="h-3 w-3" />
+                  Offline
                 </span>
               )}
             </h3>
@@ -141,10 +164,39 @@ const JobCard = ({ job, progress, connectionStatus, onRun, onStop, onEdit, onDel
             </div>
           )}
 
+          {/* Missing-connection banner. Appears when the remote referenced
+              by the job's destination is not present in rclone.conf at all
+              (e.g. deleted, or the job was imported from another install).
+              The only fix is to create / re-add the connection, so we send
+              the user straight to the Connections page. */}
+          {connectionMissing && (
+            <div className="mt-2 flex items-start gap-2 p-2 rounded-md border border-destructive/40 bg-destructive/10">
+              <Unplug className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0 text-xs">
+                <div className="font-medium text-destructive">
+                  Connection "{remoteName}" not configured
+                </div>
+                <div className="text-muted-foreground">
+                  This job can't run until the connection is created or re-added.
+                </div>
+              </div>
+              {onManageConnections && (
+                <Button
+                  size="sm"
+                  onClick={onManageConnections}
+                  className="h-7 px-2 text-xs gap-1.5 flex-shrink-0"
+                >
+                  <SettingsIcon className="h-3.5 w-3.5" />
+                  Fix
+                </Button>
+              )}
+            </div>
+          )}
+
           {/* Connection-offline banner. Appears when the remote this job
               depends on fails its health check. Gives the user a one-click
               Reconnect path without hunting through the settings. */}
-          {connectionOffline && (
+          {!connectionMissing && connectionOffline && (
             <div className="mt-2 flex items-start gap-2 p-2 rounded-md border border-destructive/40 bg-destructive/10">
               <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0 text-xs">

@@ -36,6 +36,9 @@ function App() {
   // Map of remote-name → { state: 'ok'|'fail'|'testing', message, type } used
   // by JobCard banners and BackupStatistics. Populated by `refreshRemoteStatuses`.
   const [remoteStatuses, setRemoteStatuses] = useState({})
+  // Tracks whether we've successfully fetched the remotes list at least once.
+  // Used so JobCard can distinguish "still loading" from "remote truly missing".
+  const [remotesLoaded, setRemotesLoaded] = useState(false)
   // Target of the Reconnect modal (triggered from a JobCard).
   const [reconnectTarget, setReconnectTarget] = useState(null) // { name, type }
 
@@ -47,12 +50,13 @@ function App() {
     try {
       const res = await getRemotesDetailed()
       const list = res.data || []
-      // Seed statuses as "testing" for instant UI feedback.
-      setRemoteStatuses(prev => {
+      setRemotesLoaded(true)
+      // Replace the map so deleted remotes drop out (important for the
+      // "missing connection" warning on jobs).
+      setRemoteStatuses(() => {
         const next = {}
         for (const r of list) {
-          next[r.name] = prev[r.name] || { state: 'testing', message: 'Testing…', type: r.type }
-          next[r.name].type = r.type
+          next[r.name] = { state: 'testing', message: 'Testing…', type: r.type }
         }
         return next
       })
@@ -403,6 +407,7 @@ function App() {
                       job={job}
                       progress={jobProgress[job.id]}
                       connectionStatus={connStatus}
+                      connectionMissing={remotesLoaded && !!remoteName && !connStatus}
                       onRun={handleRunJob}
                       onStop={handleStopJob}
                       onEdit={handleEditJob}
@@ -411,6 +416,7 @@ function App() {
                         name,
                         type: remoteStatuses[name]?.type,
                       })}
+                      onManageConnections={() => setShowConfig(true)}
                     />
                   )
                 })}
