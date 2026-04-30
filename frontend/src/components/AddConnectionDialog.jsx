@@ -253,9 +253,9 @@ const DynamicProviderForm = ({ provider, onCreated, onCancel }) => {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
-  // Filter options: skip hidden/auth ones; rclone uses Hide bitmask where 1
-  // means hidden in CLI prompts.
-  const visibleOptions = (provider.Options || []).filter(o => !o.Hide && !o.NoPrefix === false)
+  // rclone's Hide is a bitmask (1=config, 2=cmdline, 4=always). Skip anything
+  // marked hidden from the config UI (bit 0 set).
+  const visibleOptions = (provider.Options || []).filter(o => !(o.Hide & 1))
   const basicOpts = visibleOptions.filter(o => !o.Advanced)
   const advancedOpts = visibleOptions.filter(o => o.Advanced)
 
