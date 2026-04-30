@@ -140,28 +140,6 @@ reading only the archive's central directory via `rclone cat --offset --count`.
 - **Storage glue** — `rclone config create` (any backend), per-provider OAuth
   for Google Drive
 
-## Project layout
-
-```
-app/              # FastAPI backend
-  main.py         # Routes (config / jobs / restore / SSE)
-  auth_manager.py # rclone.conf parsing + generic remote creation
-  job_engine.py   # rclone invocations, ZIP building, retention
-  scheduler.py    # APScheduler wrapper
-  self_backup.py  # Push rclone.conf + jobs.json to the primary remote
-  guardian.py     # SMTP alerts
-frontend/src/
-  App.jsx
-  components/
-    ConnectionsManager.jsx   # Manage remotes (add / test / reconnect / delete)
-    AddConnectionDialog.jsx  # Dynamic form built from rclone providers JSON
-    ReconnectDialog.jsx      # Re-auth an existing OAuth remote in place
-    JobDialog.jsx            # Create / edit a job (connection dropdown)
-    JobCard.jsx              # Job card with offline / missing banners
-    RestoreSnapshots.jsx     # Grid of every snapshot
-    RestoreWizard.jsx        # 4-step restore flow
-```
-
 ## License
 
 MIT
