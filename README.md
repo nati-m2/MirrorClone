@@ -1,3 +1,8 @@
+<img width="2695" height="1054" alt="Screenshot 2026-04-30 at 20-03-19 MirrorClone 192 168 0 7" src="https://github.com/user-attachments/assets/d9fd25a5-ec14-4d8f-85e8-7e0860e44c86" />
+<img width="2695" height="1054" alt="Screenshot 2026-04-30 at 20-03-44 MirrorClone 192 168 0 7" src="https://github.com/user-attachments/assets/5bf80caf-8d2d-4371-ae90-fad46b9fbf17" />
+<img width="2695" height="1054" alt="Screenshot 2026-04-30 at 20-04-19 MirrorClone 192 168 0 7" src="https://github.com/user-attachments/assets/037a7bad-8fed-4827-b16a-b669b2905b93" />
+<img width="2695" height="1054" alt="Screenshot 2026-04-30 at 20-08-06 MirrorClone 192 168 0 7" src="https://github.com/user-attachments/assets/22f1f312-b05b-4233-98b4-57bd976913d2" />
+<img width="2285" height="1011" alt="Screenshot 2026-04-30 at 20-21-12 MirrorClone 192 168 0 7" src="https://github.com/user-attachments/assets/e0504c92-89ed-405a-8194-4d772f4e6eff" />
 # MirrorClone
 
 Self-hosted, Dockerized backup manager with a modern web UI. Backs up any local
