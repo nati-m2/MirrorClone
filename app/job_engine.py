@@ -33,7 +33,7 @@ class JobEngine:
             if job.compress_before_upload:
                 self._log(job.id, "progress", "Creating ZIP archive...")
                 if on_progress:
-                    await on_progress("zipping", "יוצר קובץ ZIP...", 0)
+                    await on_progress("zipping", "Creating ZIP archive...", 0)
                 # Run ZIP creation in thread pool to not block
                 loop = asyncio.get_event_loop()
                 zip_path = await loop.run_in_executor(
@@ -46,7 +46,7 @@ class JobEngine:
                     if job.local_retention_count > 0:
                         await self._cleanup_old_local_zips_async(job)
                     if on_progress:
-                        await on_progress("uploading", "מעלה קבצים...", 0)
+                        await on_progress("uploading", "Uploading files...", 0)
                     return await self._upload_file(job, zip_path, on_progress)
                 else:
                     self._log(job.id, "failed", "Failed to create ZIP archive", -1)
@@ -54,7 +54,7 @@ class JobEngine:
             
             # No ZIP - upload each path preserving structure
             if on_progress:
-                await on_progress("uploading", "מעלה קבצים...", 0)
+                await on_progress("uploading", "Uploading files...", 0)
             return await self._upload_paths(job, source_paths, on_progress)
             
         except Exception as e:
@@ -200,7 +200,7 @@ class JobEngine:
                             last_percent = percent
                             if on_progress and loop:
                                 asyncio.run_coroutine_threadsafe(
-                                    on_progress("uploading", f"מעלה קבצים... {percent}%", percent),
+                                    on_progress("uploading", f"Uploading files... {percent}%", percent),
                                     loop
                                 )
                 except:

@@ -35,8 +35,9 @@ class EventBroadcaster:
 
 broadcaster = EventBroadcaster()
 from app.models import (
-    Job, JobCreate, JobUpdate, JobStatus, JobLog, 
-    RcloneConfig, SystemStatus
+    Job, JobCreate, JobUpdate, JobStatus, JobLog,
+    RcloneConfig, SystemStatus,
+    NotificationProvider, NotificationProviderCreate, NotificationProviderUpdate,
 )
 from app.auth_manager import AuthManager
 from app.job_engine import JobEngine
@@ -44,11 +45,19 @@ from app.job_manager import JobManager
 from app.scheduler import JobScheduler
 from app.guardian import Guardian
 from app.self_backup import SelfBackup
+from app.notifications_manager import NotificationsManager
+from app.app_settings_manager import (
+    AppSettingsManager,
+    GoogleDriveCredentials,
+    GoogleDriveCredentialsUpdate,
+)
 
 
 job_manager = JobManager()
-auth_manager = AuthManager()
-guardian = Guardian()
+app_settings_manager = AppSettingsManager()
+auth_manager = AuthManager(app_settings=app_settings_manager)
+notifications_manager = NotificationsManager()
+guardian = Guardian(notifications_manager=notifications_manager)
 job_engine = JobEngine(on_log=job_manager.add_log)
 self_backup = SelfBackup()
 
@@ -61,7 +70,7 @@ async def execute_job_wrapper(job_id: str):
         return
     
     job_manager.update_job_status(job_id, JobStatus.RUNNING)
-    await broadcaster.broadcast("job_progress", {"job_id": job_id, "stage": "preparing", "message": "מכין קבצים..."})
+    await broadcaster.broadcast("job_progress", {"job_id": job_id, "stage": "preparing", "message": "Preparing files..."})
     
     start_time = time.time()
     
@@ -79,22 +88,22 @@ async def execute_job_wrapper(job_id: str):
     
     # Format duration message
     if duration < 60:
-        duration_msg = f"{duration} שניות"
+        duration_msg = f"{duration}s"
     else:
         mins = duration // 60
         secs = duration % 60
-        duration_msg = f"{mins} דקות" + (f" ו-{secs} שניות" if secs > 0 else "")
+        duration_msg = f"{mins}m" + (f" {secs}s" if secs > 0 else "")
     
     if success:
         job_manager.update_job_status(job_id, JobStatus.SUCCESS, duration=duration)
         await broadcaster.broadcast("job_progress", {
             "job_id": job_id, 
             "stage": "completed", 
-            "message": f"הגיבוי הסתיים בהצלחה תוך {duration_msg}"
+            "message": f"Backup completed successfully in {duration_msg}"
         })
         logs = job_manager.get_logs(job_id, limit=1)
         if logs:
-            await guardian.on_job_success(job.name, logs[0])
+            await guardian.on_job_success(job, logs[0])
         
         await self_backup.backup_config()
     else:
@@ -102,11 +111,11 @@ async def execute_job_wrapper(job_id: str):
         await broadcaster.broadcast("job_progress", {
             "job_id": job_id, 
             "stage": "failed", 
-            "message": f"הגיבוי נכשל: {output[:100]}"
+            "message": f"Backup failed: {output[:100]}"
         })
         logs = job_manager.get_logs(job_id, limit=1)
         if logs:
-            await guardian.on_job_failed(job.name, logs[0])
+            await guardian.on_job_failed(job, logs[0])
     
     # Broadcast job status change
     await broadcaster.broadcast("job_updated", {"job_id": job_id})
@@ -829,8 +838,89 @@ async def restore_backup(timestamp: str):
 
 @app.post("/api/test/notifications")
 async def test_notifications():
-    """Test notification system"""
-    success, message = guardian.test_notifications()
+    """Legacy endpoint kept for backwards compatibility.
+    Notifications are now configured per-job; use /api/notifications/{id}/test.
+    """
+    return {
+        "success": False,
+        "message": "Global notifications were removed. Use Settings → Notifications "
+                   "to add an Apprise provider and test it per provider.",
+    }
+
+
+# ── App settings: Google Drive OAuth credentials ─────────────────────────────
+@app.get("/api/settings/google-drive", response_model=GoogleDriveCredentials)
+async def get_google_drive_credentials():
+    """Return the currently effective Google Drive OAuth client credentials.
+
+    When the user hasn't set their own they fall back to rclone's shared
+    (rate-limited) defaults so the app still works out of the box.
+    """
+    return app_settings_manager.get_google_drive_credentials()
+
+
+@app.put("/api/settings/google-drive", response_model=GoogleDriveCredentials)
+async def update_google_drive_credentials(payload: GoogleDriveCredentialsUpdate):
+    """Update (or clear) the Google Drive OAuth client credentials.
+
+    Pass empty strings to revert to rclone's shared defaults.
+    """
+    return app_settings_manager.update_google_drive_credentials(payload)
+
+
+# ── Per-job notification providers (Apprise) ─────────────────────────────────
+@app.get("/api/notifications", response_model=list[NotificationProvider])
+async def list_notification_providers():
+    """List all configured Apprise notification providers."""
+    return notifications_manager.list()
+
+
+@app.post("/api/notifications", response_model=NotificationProvider)
+async def create_notification_provider(payload: NotificationProviderCreate):
+    """Create a new Apprise notification provider."""
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="name is required")
+    if not payload.url.strip():
+        raise HTTPException(status_code=400, detail="url is required")
+    # Validate that Apprise accepts this URL before persisting.
+    import apprise as _apprise
+    probe = _apprise.Apprise()
+    if not probe.add(payload.url.strip()):
+        raise HTTPException(status_code=400, detail="Invalid Apprise URL")
+    return notifications_manager.create(payload)
+
+
+@app.put("/api/notifications/{provider_id}", response_model=NotificationProvider)
+async def update_notification_provider(provider_id: str, payload: NotificationProviderUpdate):
+    """Update an existing notification provider."""
+    if payload.url is not None and payload.url.strip():
+        import apprise as _apprise
+        probe = _apprise.Apprise()
+        if not probe.add(payload.url.strip()):
+            raise HTTPException(status_code=400, detail="Invalid Apprise URL")
+    provider = notifications_manager.update(provider_id, payload)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return provider
+
+
+@app.delete("/api/notifications/{provider_id}")
+async def delete_notification_provider(provider_id: str):
+    """Delete a notification provider."""
+    if not notifications_manager.delete(provider_id):
+        raise HTTPException(status_code=404, detail="Provider not found")
+    return {"message": "Provider deleted"}
+
+
+@app.post("/api/notifications/{provider_id}/test")
+async def test_notification_provider(provider_id: str):
+    """Send a test notification through a single provider."""
+    loop = asyncio.get_event_loop()
+    success, message = await loop.run_in_executor(
+        None, lambda: notifications_manager.test(provider_id)
+    )
+    if not success and message == "provider not found":
+        raise HTTPException(status_code=404, detail=message)
     return {"success": success, "message": message}
 
 

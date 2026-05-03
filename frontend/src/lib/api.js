@@ -36,6 +36,17 @@ export const restoreBackup = (timestamp) => api.post(`/backup/restore/${timestam
 
 export const testNotifications = () => api.post('/test/notifications')
 
+// App settings — Google Drive OAuth credentials
+export const getGoogleDriveCredentials = () => api.get('/settings/google-drive')
+export const updateGoogleDriveCredentials = (payload) => api.put('/settings/google-drive', payload)
+
+// Per-job Apprise notification providers
+export const listNotificationProviders = () => api.get('/notifications')
+export const createNotificationProvider = (payload) => api.post('/notifications', payload)
+export const updateNotificationProvider = (id, payload) => api.put(`/notifications/${id}`, payload)
+export const deleteNotificationProvider = (id) => api.delete(`/notifications/${id}`)
+export const testNotificationProvider = (id) => api.post(`/notifications/${id}/test`)
+
 export const startGoogleDriveAuth = (remoteName = 'gdrive') => 
   api.post('/auth/google-drive/start', null, { params: { remote_name: remoteName } })
 

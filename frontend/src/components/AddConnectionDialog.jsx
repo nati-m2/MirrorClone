@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
   X, Cloud, HardDrive, Server, Database, Loader2, Search,
-  Eye, EyeOff, AlertTriangle, CheckCircle2, Chrome, ChevronRight, ChevronLeft
+  Eye, EyeOff, AlertTriangle, CheckCircle2, Chrome, ChevronRight, ChevronLeft,
+  Settings2,
 } from 'lucide-react'
 import Button from './ui/Button'
 import { getProviders, createRemote, startGoogleDriveAuth, exchangeGoogleDriveCode } from '../lib/api'
+import GoogleDriveSettings from './GoogleDriveSettings'
 
 /**
  * Dialog for creating a new connection (rclone remote).
@@ -117,6 +119,7 @@ export const GoogleDriveStep = ({ onCreated, onCancel, initialName = 'gdrive', l
   const [authUrl, setAuthUrl] = useState('')
   const [authCode, setAuthCode] = useState('')
   const [message, setMessage] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const start = async () => {
     setStage('connecting'); setMessage('')
@@ -238,6 +241,28 @@ export const GoogleDriveStep = ({ onCreated, onCancel, initialName = 'gdrive', l
           </div>
         </div>
       )}
+
+      {/* Advanced OAuth client settings — collapsed by default.
+          Lets power users plug in their own Google Cloud Client ID/Secret
+          instead of the rclone shared default (which is rate-limited). */}
+      <div className="pt-2 border-t border-border">
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(s => !s)}
+          className="w-full flex items-center justify-between text-sm text-muted-foreground hover:text-foreground py-1"
+        >
+          <span className="flex items-center gap-1.5">
+            <Settings2 className="h-3.5 w-3.5" />
+            Advanced settings (OAuth client)
+          </span>
+          <ChevronRight className={`h-4 w-4 transition-transform ${showAdvanced ? 'rotate-90' : ''}`} />
+        </button>
+        {showAdvanced && (
+          <div className="mt-3 pl-2 border-l-2 border-border">
+            <GoogleDriveSettings />
+          </div>
+        )}
+      </div>
 
       <div className="pt-2 border-t border-border">
         <Button variant="ghost" onClick={onCancel} className="gap-1.5">

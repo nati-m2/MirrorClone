@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react'
 import {
   Plus, Trash2, RefreshCw, CheckCircle2, XCircle, Loader2, Link2,
-  Cloud, HardDrive, Server, Database, AlertTriangle, Upload, Download
+  Cloud, HardDrive, Server, Database, AlertTriangle, Upload, Download,
+  ChevronDown, Bell,
 } from 'lucide-react'
 import Button from './ui/Button'
 import AddConnectionDialog from './AddConnectionDialog'
 import ReconnectDialog from './ReconnectDialog'
+import NotificationsManager from './NotificationsManager'
 import {
   getRemotesDetailed, deleteRemote, testRemote, uploadConfig, downloadConfig
 } from '../lib/api'
@@ -125,6 +127,41 @@ const ConnectionCard = ({ remote, onDelete, onTest, onReconnect, testStatus }) =
   )
 }
 
+// Lightweight collapsible section used to group Connections / Notifications
+// on the Settings screen. Stateless — the caller controls `open`.
+const CollapsibleSection = ({ icon: Icon, title, subtitle, badge, open, onToggle, children }) => (
+  <div className="rounded-lg border border-border overflow-hidden">
+    <button
+      type="button"
+      onClick={onToggle}
+      className="w-full flex items-center gap-3 px-4 py-3 bg-card hover:bg-accent/40 transition-colors text-left"
+    >
+      {Icon && <Icon className="h-5 w-5 text-primary flex-shrink-0" />}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          <h3 className="font-medium">{title}</h3>
+          {badge != null && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              {badge}
+            </span>
+          )}
+        </div>
+        {subtitle && (
+          <div className="text-xs text-muted-foreground truncate">{subtitle}</div>
+        )}
+      </div>
+      <ChevronDown
+        className={`h-4 w-4 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
+      />
+    </button>
+    {open && (
+      <div className="px-4 py-4 border-t border-border bg-background/40">
+        {children}
+      </div>
+    )}
+  </div>
+)
+
 const ConnectionsManager = ({ onClose }) => {
   const [remotes, setRemotes] = useState([])
   const [loading, setLoading] = useState(true)
@@ -133,6 +170,9 @@ const ConnectionsManager = ({ onClose }) => {
   const [tests, setTests] = useState({}) // { name: { state, message } }
   const [busy, setBusy] = useState(false)
   const [reconnectTarget, setReconnectTarget] = useState(null) // remote object
+  // Which sections are expanded — Connections is open by default since
+  // that's what users come here for most often.
+  const [openSection, setOpenSection] = useState('connections') // 'connections' | 'notifications' | null
 
   const runTest = async (name) => {
     setTests(prev => ({ ...prev, [name]: { state: 'testing', message: 'Testing…' } }))
@@ -253,76 +293,99 @@ const ConnectionsManager = ({ onClose }) => {
         </div>
       </header>
 
-      <div className="container mx-auto px-6 py-6 max-w-3xl space-y-4">
-        {/* Add button row */}
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium text-muted-foreground">
-            {remotes.length} {remotes.length === 1 ? 'connection' : 'connections'}
-          </h2>
-          <Button onClick={() => setShowAdd(true)} className="gap-2">
-            <Plus className="h-4 w-4" />
-            Add Connection
-          </Button>
-        </div>
+      <div className="container mx-auto px-6 py-6 max-w-3xl space-y-3">
+        {/* ── Connections section ───────────────────────────────────────── */}
+        <CollapsibleSection
+          icon={Cloud}
+          title="Connections"
+          subtitle="Cloud and storage remotes used by your backup jobs"
+          badge={remotes.length}
+          open={openSection === 'connections'}
+          onToggle={() => setOpenSection(openSection === 'connections' ? null : 'connections')}
+        >
+          <div className="space-y-4">
+            {/* Add button row */}
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-medium text-muted-foreground">
+                {remotes.length} {remotes.length === 1 ? 'connection' : 'connections'}
+              </h2>
+              <Button onClick={() => setShowAdd(true)} className="gap-2">
+                <Plus className="h-4 w-4" />
+                Add Connection
+              </Button>
+            </div>
 
-        {/* List */}
-        {loading ? (
-          <div className="flex items-center justify-center py-12 gap-2 text-muted-foreground">
-            <Loader2 className="h-5 w-5 animate-spin" /> Loading…
-          </div>
-        ) : error ? (
-          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-2 text-destructive text-sm">
-            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
-            <div>{error}</div>
-          </div>
-        ) : remotes.length === 0 ? (
-          <div className="text-center py-12 rounded-lg border border-dashed border-border">
-            <Cloud className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-            <h3 className="font-semibold mb-1">No connections yet</h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              Add your first cloud or storage connection to start creating backup jobs.
-            </p>
-            <Button onClick={() => setShowAdd(true)} className="gap-2 mx-auto">
-              <Plus className="h-4 w-4" />
-              Add your first connection
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {remotes.map(r => (
-              <ConnectionCard
-                key={r.name}
-                remote={r}
-                onTest={handleTest}
-                onDelete={handleDelete}
-                onReconnect={setReconnectTarget}
-                testStatus={tests[r.name]}
-              />
-            ))}
-          </div>
-        )}
+            {/* List */}
+            {loading ? (
+              <div className="flex items-center justify-center py-10 gap-2 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+              </div>
+            ) : error ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-2 text-destructive text-sm">
+                <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <div>{error}</div>
+              </div>
+            ) : remotes.length === 0 ? (
+              <div className="text-center py-10 rounded-lg border border-dashed border-border">
+                <Cloud className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
+                <h3 className="font-semibold mb-1">No connections yet</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Add your first cloud or storage connection to start creating backup jobs.
+                </p>
+                <Button onClick={() => setShowAdd(true)} className="gap-2 mx-auto">
+                  <Plus className="h-4 w-4" />
+                  Add your first connection
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {remotes.map(r => (
+                  <ConnectionCard
+                    key={r.name}
+                    remote={r}
+                    onTest={handleTest}
+                    onDelete={handleDelete}
+                    onReconnect={setReconnectTarget}
+                    testStatus={tests[r.name]}
+                  />
+                ))}
+              </div>
+            )}
 
-        {/* Power-user controls */}
-        <div className="pt-6 border-t border-border space-y-3">
-          <h3 className="text-sm font-medium text-muted-foreground">Advanced</h3>
-          <div className="flex flex-wrap gap-2">
-            <label className="cursor-pointer">
-              <input type="file" accept=".conf" onChange={handleUpload} className="hidden" />
-              <span className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded-md border border-border hover:bg-accent transition-colors">
-                <Upload className="h-4 w-4" />
-                Upload rclone.conf
-              </span>
-            </label>
-            <Button variant="outline" size="sm" onClick={handleDownload} className="gap-2 h-9">
-              <Download className="h-4 w-4" />
-              Download rclone.conf
-            </Button>
+            {/* Power-user controls: raw rclone.conf import/export */}
+            <div className="pt-4 border-t border-border space-y-2">
+              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Advanced</h4>
+              <div className="flex flex-wrap gap-2">
+                <label className="cursor-pointer">
+                  <input type="file" accept=".conf" onChange={handleUpload} className="hidden" />
+                  <span className="inline-flex items-center gap-2 px-3 py-2 text-sm rounded-md border border-border hover:bg-accent transition-colors">
+                    <Upload className="h-4 w-4" />
+                    Upload rclone.conf
+                  </span>
+                </label>
+                <Button variant="outline" size="sm" onClick={handleDownload} className="gap-2 h-9">
+                  <Download className="h-4 w-4" />
+                  Download rclone.conf
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Replace the entire config by uploading a file generated with <code className="font-mono">rclone config</code>,
+                or download a backup of the current configuration.
+              </p>
+            </div>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Replace the entire config by uploading a file generated with <code className="font-mono">rclone config</code>,
-            or download a backup of the current configuration.
-          </p>
-        </div>
+        </CollapsibleSection>
+
+        {/* ── Notifications section ─────────────────────────────────────── */}
+        <CollapsibleSection
+          icon={Bell}
+          title="Notifications"
+          subtitle="Apprise endpoints (Telegram, Slack, Email, ...) used by your jobs"
+          open={openSection === 'notifications'}
+          onToggle={() => setOpenSection(openSection === 'notifications' ? null : 'notifications')}
+        >
+          <NotificationsManager embedded />
+        </CollapsibleSection>
       </div>
 
       {showAdd && (

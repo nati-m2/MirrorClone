@@ -24,6 +24,10 @@ class Job(BaseModel):
     zip_password: Optional[str] = Field(default=None, description="Password for ZIP encryption")
     retention_count: int = Field(default=0, description="Keep only X latest remote backups (0 = keep all)")
     local_retention_count: int = Field(default=0, description="Keep only X latest local ZIP backups in /backups (0 = keep all)")
+    # Notification preferences (Apprise provider ids + event flags)
+    notification_ids: list[str] = Field(default_factory=list, description="Notification provider IDs to fire for this job")
+    notify_on_success: bool = Field(default=False, description="Send notification when job succeeds")
+    notify_on_failure: bool = Field(default=True, description="Send notification when job fails")
     
     status: JobStatus = Field(default=JobStatus.IDLE, description="Current job status")
     last_run: Optional[datetime] = Field(default=None, description="Last execution timestamp")
@@ -45,6 +49,9 @@ class JobCreate(BaseModel):
     zip_password: Optional[str] = None
     retention_count: int = 0
     local_retention_count: int = 0
+    notification_ids: list[str] = []
+    notify_on_success: bool = False
+    notify_on_failure: bool = True
 
 
 class JobUpdate(BaseModel):
@@ -59,6 +66,29 @@ class JobUpdate(BaseModel):
     zip_password: Optional[str] = None
     retention_count: Optional[int] = None
     local_retention_count: Optional[int] = None
+    notification_ids: Optional[list[str]] = None
+    notify_on_success: Optional[bool] = None
+    notify_on_failure: Optional[bool] = None
+
+
+class NotificationProvider(BaseModel):
+    """A single Apprise-compatible notification endpoint."""
+    id: str = Field(..., description="Unique provider id")
+    name: str = Field(..., description="Human-readable label")
+    url: str = Field(..., description="Apprise URL (e.g. tgram://, mailto://, slack://, pover://)")
+    enabled: bool = Field(default=True, description="Whether the provider is active")
+
+
+class NotificationProviderCreate(BaseModel):
+    name: str
+    url: str
+    enabled: bool = True
+
+
+class NotificationProviderUpdate(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
 
 
 class JobLog(BaseModel):

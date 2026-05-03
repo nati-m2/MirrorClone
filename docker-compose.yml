@@ -13,14 +13,10 @@ services:
       - /srv/link_appdata:/data
 
     environment:
-#      - GOOGLE_CLIENT_ID=your-client-id
-#      - GOOGLE_CLIENT_SECRET=your-client-secret
+      # Google Drive OAuth credentials and notification providers are now
+      # configured from the UI (Settings screen). See /config/app_settings.json
+      # and /config/notifications.json inside the container volume.
       - TZ=Asia/Jerusalem
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
-      - SMTP_FROM=${SMTP_FROM:-}
     privileged: true
     networks:
       - backup-network

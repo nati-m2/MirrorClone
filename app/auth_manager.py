@@ -8,15 +8,23 @@ from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime
 from app.config import settings
+from app.app_settings_manager import (
+    AppSettingsManager,
+    RCLONE_DEFAULT_CLIENT_ID,
+)
 
 
 class AuthManager:
     """Manages Rclone authentication and configuration"""
     
-    def __init__(self):
+    def __init__(self, app_settings: AppSettingsManager | None = None):
         self.config_path = settings.rclone_config
         self.config_dir = settings.config_dir
         self.oauth_state_file = self.config_dir / "oauth_state.json"
+        # App settings provide Google OAuth credentials that the user can
+        # override from the UI. Fall back to a lazy instance when not injected
+        # so unit code paths that construct AuthManager directly still work.
+        self.app_settings = app_settings or AppSettingsManager()
         self._config_lock = threading.Lock()
         # Cache rarely-changing values to avoid spawning rclone on every request
         self._rclone_version_cache: Optional[str] = None
@@ -115,8 +123,8 @@ class AuthManager:
             self.config_dir.mkdir(parents=True, exist_ok=True)
             
             # Check if using custom Client ID (not rclone's default)
-            rclone_default_client = "202264815644.apps.googleusercontent.com"
-            using_custom_client = settings.google_client_id != rclone_default_client
+            creds = self.app_settings.get_google_drive_credentials()
+            using_custom_client = creds.client_id != RCLONE_DEFAULT_CLIENT_ID
             
             # Determine redirect URI
             if using_custom_client:
@@ -136,7 +144,7 @@ class AuthManager:
             from urllib.parse import quote
             auth_url = (
                 "https://accounts.google.com/o/oauth2/auth?"
-                f"client_id={settings.google_client_id}&"
+                f"client_id={creds.client_id}&"
                 f"redirect_uri={quote(redirect_uri, safe='')}&"
                 "response_type=code&"
                 "scope=https://www.googleapis.com/auth/drive&"
@@ -193,11 +201,12 @@ class AuthManager:
                         pass
                 
                 # Exchange code for token
+                creds = self.app_settings.get_google_drive_credentials()
                 token_url = "https://oauth2.googleapis.com/token"
                 data = {
                     "code": actual_code,
-                    "client_id": settings.google_client_id,
-                    "client_secret": settings.google_client_secret,
+                    "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
                     "redirect_uri": redirect_uri,
                     "grant_type": "authorization_code"
                 }

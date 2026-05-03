@@ -11,19 +11,12 @@ class Settings(BaseSettings):
     
     jobs_file: Path = config_dir / "jobs.json"
     rclone_config: Path = config_dir / "rclone.conf"
-    
-    smtp_host: str = ""
-    smtp_port: int = 587
-    smtp_user: str = ""
-    smtp_password: str = ""
-    smtp_from: str = ""
-    
-    # Google OAuth - use custom Client ID for proper redirect
+
+    # Google OAuth defaults. Users override these from the UI
+    # (AppSettingsManager writes /config/app_settings.json).
     google_client_id: str = "202264815644.apps.googleusercontent.com"  # rclone default
     google_client_secret: str = "X4Z3ca8xfWDb1Voo-F9a7ZxJ"  # rclone default
     oauth_redirect_uri: str = ""  # Empty = auto-detect from request
-    
-    alert_emails: list[str] = []
     
     class Config:
         env_file = ".env"

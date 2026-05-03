@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react'
-import { X, Clock, Folder, Cloud, AlertTriangle } from 'lucide-react'
+import { X, Clock, Folder, Cloud, AlertTriangle, Bell } from 'lucide-react'
 import Button from './ui/Button'
 import Input from './ui/Input'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card'
 import FileBrowser from './FileBrowser'
-import { getRemotesDetailed } from '../lib/api'
+import { getRemotesDetailed, listNotificationProviders } from '../lib/api'
 
 // Default subfolder appended after the remote name. Kept for backwards compat
 // with snapshots already created under "<remote>:MirrorCloneBackups/...".
@@ -53,12 +53,25 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
     zip_password: '',
     retention_count: 0,
     local_retention_count: 0,
+    notification_ids: [],
+    notify_on_success: false,
+    notify_on_failure: true,
   })
   const [showCronPresets, setShowCronPresets] = useState(false)
   const [showPathSuggestions, setShowPathSuggestions] = useState(false)
   const [showFileBrowser, setShowFileBrowser] = useState(false)
   const [remotes, setRemotes] = useState([])
   const [remotesLoading, setRemotesLoading] = useState(true)
+  const [notifProviders, setNotifProviders] = useState([])
+
+  // Load the available notification providers so the user can tick them on.
+  useEffect(() => {
+    let active = true
+    listNotificationProviders()
+      .then(res => { if (active) setNotifProviders(res.data || []) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [])
 
   // Load configured connections so the user can pick one for this job.
   useEffect(() => {
@@ -96,6 +109,9 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
         zip_password: job.zip_password || '',
         retention_count: job.retention_count !== undefined ? job.retention_count : 0,
         local_retention_count: job.local_retention_count !== undefined ? job.local_retention_count : 0,
+        notification_ids: Array.isArray(job.notification_ids) ? job.notification_ids : [],
+        notify_on_success: job.notify_on_success ?? false,
+        notify_on_failure: job.notify_on_failure ?? true,
       })
     }
   }, [job])
@@ -416,6 +432,76 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
                   ? 'Retention for local ZIP files in /backups volume (0 = keep all)'
                   : 'Local ZIPs are only created when compression is enabled'}
               </p>
+            </div>
+
+            {/* ── Notifications ──────────────────────────────────────── */}
+            <div className="pt-2 border-t border-border">
+              <label className="text-sm font-medium mb-2 flex items-center gap-1.5">
+                <Bell className="h-3.5 w-3.5" />
+                Notifications
+              </label>
+
+              <div className="flex flex-wrap gap-4 mb-3">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={formData.notify_on_failure}
+                    onChange={(e) => setFormData(prev => ({ ...prev, notify_on_failure: e.target.checked }))}
+                    className="rounded border-input"
+                  />
+                  <span className="text-sm">Notify on failure</span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={formData.notify_on_success}
+                    onChange={(e) => setFormData(prev => ({ ...prev, notify_on_success: e.target.checked }))}
+                    className="rounded border-input"
+                  />
+                  <span className="text-sm">Notify on success</span>
+                </label>
+              </div>
+
+              {notifProviders.length === 0 ? (
+                <div className="flex items-start gap-2 p-3 rounded-md border border-border bg-muted/30 text-xs text-muted-foreground">
+                  <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    No notification providers configured yet. Add one under{' '}
+                    <span className="font-medium">Settings → Notifications</span>.
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1 max-h-40 overflow-y-auto border border-border rounded-md p-2">
+                  {notifProviders.map(p => {
+                    const checked = formData.notification_ids.includes(p.id)
+                    return (
+                      <label key={p.id} className="flex items-center gap-2 px-1 py-1 hover:bg-accent/50 rounded">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={!p.enabled}
+                          onChange={(e) => {
+                            setFormData(prev => ({
+                              ...prev,
+                              notification_ids: e.target.checked
+                                ? [...prev.notification_ids, p.id]
+                                : prev.notification_ids.filter(x => x !== p.id),
+                            }))
+                          }}
+                          className="rounded border-input"
+                        />
+                        <span className="text-sm flex-1 truncate">
+                          {p.name}
+                          {!p.enabled && <span className="text-xs text-muted-foreground ml-2">(disabled)</span>}
+                        </span>
+                        <code className="text-[10px] font-mono text-muted-foreground truncate max-w-[50%]" title={p.url}>
+                          {p.url.split('://')[0]}://…
+                        </code>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2 pt-4">
