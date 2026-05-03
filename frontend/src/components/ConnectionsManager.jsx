@@ -221,11 +221,18 @@ const ConnectionsManager = ({ onClose }) => {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <header className="px-6 py-3 flex items-center justify-between border-b border-border">
-        <div>
-          <h1 className="text-lg font-medium">Connections</h1>
-          <p className="text-xs text-muted-foreground">
-            Manage cloud and storage connections used by your backup jobs.
-          </p>
+        <div className="flex items-center gap-3">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" className="h-7 w-7 flex-shrink-0">
+            <rect width="64" height="64" rx="14" fill="hsl(var(--primary))"/>
+            <path d="M14 24 C14 20 18 17 22 17 L36 17 L36 13 L50 22 L36 31 L36 27 L22 27 C20 27 19 26 19 24 Z" fill="white"/>
+            <path d="M50 40 C50 44 46 47 42 47 L28 47 L28 51 L14 42 L28 33 L28 37 L42 37 C44 37 45 38 45 40 Z" fill="white" opacity="0.85"/>
+          </svg>
+          <div>
+            <h1 className="text-lg font-medium">MirrorClone</h1>
+            <p className="text-xs text-muted-foreground">
+              Manage cloud and storage connections used by your backup jobs.
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={refresh} className="h-8 px-2 gap-1.5" title="Refresh">

@@ -313,7 +313,7 @@ function App() {
             <path d="M14 24 C14 20 18 17 22 17 L36 17 L36 13 L50 22 L36 31 L36 27 L22 27 C20 27 19 26 19 24 Z" fill="white"/>
             <path d="M50 40 C50 44 46 47 42 47 L28 47 L28 51 L14 42 L28 33 L28 37 L42 37 C44 37 45 38 45 40 Z" fill="white" opacity="0.85"/>
           </svg>
-          <h1 className="text-lg font-medium">Backups</h1>
+          <h1 className="text-lg font-medium">MirrorClone</h1>
         </div>
 
         <div className="flex items-center gap-2">
