@@ -491,9 +491,29 @@ async def download_config():
 
 @app.post("/api/config/test/{remote_name}")
 async def test_remote(remote_name: str):
-    """Test remote connection"""
+    """Test remote connection.
+
+    On a successful test, if there are no jobs configured locally yet,
+    attempt to pull `jobs.json` from `<remote_name>:MirrorCloneBackups/
+    mirrorclone-config/` so the user gets back in sync with any previous
+    instance that backed up to the same cloud. Only `jobs.json` is copied —
+    we never overwrite the freshly added rclone.conf.
+    """
     success, message = auth_manager.test_remote(remote_name)
-    return {"success": success, "message": message}
+    jobs_restored = 0
+    restore_message = None
+
+    if success and len(job_manager.get_all_jobs()) == 0:
+        ok, restore_message = await self_backup.restore_jobs_only(remote_name)
+        if ok:
+            jobs_restored = job_manager.reload()
+
+    return {
+        "success": success,
+        "message": message,
+        "jobs_restored": jobs_restored,
+        "restore_message": restore_message,
+    }
 
 
 @app.post("/api/auth/google-drive/start")

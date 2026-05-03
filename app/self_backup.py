@@ -75,6 +75,57 @@ class SelfBackup:
         except Exception as e:
             return False, f"Restore failed: {str(e)}"
     
+    async def restore_jobs_only(self, remote_name: str) -> tuple[bool, str]:
+        """Pull ONLY jobs.json from `<remote_name>:<backup_folder>/jobs.json`.
+
+        Used as auto-sync after a successful first-time connection test:
+        we never want to overwrite the freshly added rclone.conf with an
+        old one from the cloud, so we copy a single file only.
+
+        Returns (success, message). `success=False` with a friendly message
+        when there's simply no jobs.json on that remote — that's not an error.
+        """
+        if not self.config_path.exists():
+            return False, "Rclone config not found"
+        if not remote_name:
+            return False, "Remote name is required"
+
+        source = f"{remote_name}:{self.backup_folder}/jobs.json"
+        try:
+            # First check the file actually exists, to distinguish "no backup"
+            # from "transport error".
+            check = subprocess.run(
+                [
+                    "rclone", "lsf", source,
+                    "--config", str(self.config_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if check.returncode != 0 or not check.stdout.strip():
+                return False, "No jobs.json backup on this remote"
+
+            # Copy the single file into /config (overwrites local jobs.json).
+            result = subprocess.run(
+                [
+                    "rclone", "copyto",
+                    source,
+                    str(settings.jobs_file),
+                    "--config", str(self.config_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return True, f"jobs.json restored from {remote_name}"
+            return False, f"Restore failed: {result.stderr.strip()}"
+        except subprocess.TimeoutExpired:
+            return False, "Restore timed out"
+        except Exception as e:
+            return False, f"Restore failed: {str(e)}"
+
     async def list_backups(self) -> list[str]:
         """List available configuration backup files"""
         try:

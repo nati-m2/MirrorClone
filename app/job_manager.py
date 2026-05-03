@@ -56,6 +56,15 @@ class JobManager:
         self._save_jobs()
         return job
     
+    def reload(self) -> int:
+        """Reload jobs from disk (used after pulling jobs.json from remote).
+
+        Returns the number of jobs after reload.
+        """
+        self.jobs = {}
+        self._load_jobs()
+        return len(self.jobs)
+
     def get_job(self, job_id: str) -> Optional[Job]:
         """Get a job by ID"""
         return self.jobs.get(job_id)

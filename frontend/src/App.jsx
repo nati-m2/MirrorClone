@@ -271,6 +271,7 @@ function App() {
         onClose={() => {
           checkConfig()
           refreshRemoteStatuses()
+          fetchJobs()
         }}
       />
     )
@@ -283,6 +284,7 @@ function App() {
         onClose={() => {
           checkConfig()
           refreshRemoteStatuses()
+          fetchJobs()
           setShowConfig(false)
         }}
       />

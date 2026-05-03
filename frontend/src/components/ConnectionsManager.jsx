@@ -138,11 +138,18 @@ const ConnectionsManager = ({ onClose }) => {
     setTests(prev => ({ ...prev, [name]: { state: 'testing', message: 'Testing…' } }))
     try {
       const res = await testRemote(name)
+      const restored = res.data.jobs_restored || 0
+      // When the backend auto-restored jobs.json from this remote, surface it
+      // in the status pill so the user understands why jobs suddenly appeared.
+      const baseMsg = res.data.message || (res.data.success ? 'Connected' : 'Failed')
+      const message = restored > 0
+        ? `${baseMsg} — restored ${restored} job${restored === 1 ? '' : 's'} from cloud`
+        : baseMsg
       setTests(prev => ({
         ...prev,
         [name]: {
           state: res.data.success ? 'ok' : 'fail',
-          message: res.data.message || (res.data.success ? 'Connected' : 'Failed'),
+          message,
         },
       }))
     } catch (e) {
