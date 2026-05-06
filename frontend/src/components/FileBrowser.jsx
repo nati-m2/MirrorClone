@@ -92,10 +92,26 @@ const TreeItem = ({
   )
 }
 
-const FileBrowser = ({ onSelect, onClose, multiSelect = true }) => {
-  const [currentPath, setCurrentPath] = useState('/data')
+const FileBrowser = ({ onSelect, onClose, multiSelect = true, initialSelected = [] }) => {
+  // Pre-populate selection from previously chosen paths so the user can add to
+  // an existing list instead of starting from scratch every time.
+  const initial = Array.isArray(initialSelected)
+    ? initialSelected.filter(Boolean)
+    : (initialSelected ? String(initialSelected).split(',').map(s => s.trim()).filter(Boolean) : [])
+
+  // Pick an initial directory that's most likely useful: the parent of the
+  // first existing selection, falling back to /data.
+  const initialDir = (() => {
+    if (initial.length === 0) return '/data'
+    const first = initial[0]
+    const idx = first.lastIndexOf('/')
+    if (idx <= 0) return '/'
+    return first.slice(0, idx) || '/'
+  })()
+
+  const [currentPath, setCurrentPath] = useState(initialDir)
   const [items, setItems] = useState([])
-  const [selectedPaths, setSelectedPaths] = useState([])
+  const [selectedPaths, setSelectedPaths] = useState(initial)
   const [loading, setLoading] = useState(false)
   const [parentPath, setParentPath] = useState(null)
   const [expandedDirs, setExpandedDirs] = useState(new Set())

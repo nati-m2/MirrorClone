@@ -24,6 +24,7 @@ class Job(BaseModel):
     zip_password: Optional[str] = Field(default=None, description="Password for ZIP encryption")
     retention_count: int = Field(default=0, description="Keep only X latest remote backups (0 = keep all)")
     local_retention_count: int = Field(default=0, description="Keep only X latest local ZIP backups in /backups (0 = keep all)")
+    exclude_patterns: list[str] = Field(default_factory=list, description="Glob patterns to exclude from backup (e.g. '.env', 'media/**', '*.log')")
     # Notification preferences (Apprise provider ids + event flags)
     notification_ids: list[str] = Field(default_factory=list, description="Notification provider IDs to fire for this job")
     notify_on_success: bool = Field(default=False, description="Send notification when job succeeds")
@@ -49,6 +50,7 @@ class JobCreate(BaseModel):
     zip_password: Optional[str] = None
     retention_count: int = 0
     local_retention_count: int = 0
+    exclude_patterns: list[str] = []
     notification_ids: list[str] = []
     notify_on_success: bool = False
     notify_on_failure: bool = True
@@ -66,6 +68,7 @@ class JobUpdate(BaseModel):
     zip_password: Optional[str] = None
     retention_count: Optional[int] = None
     local_retention_count: Optional[int] = None
+    exclude_patterns: Optional[list[str]] = None
     notification_ids: Optional[list[str]] = None
     notify_on_success: Optional[bool] = None
     notify_on_failure: Optional[bool] = None

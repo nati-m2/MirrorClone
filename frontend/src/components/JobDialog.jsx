@@ -53,6 +53,7 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
     zip_password: '',
     retention_count: 0,
     local_retention_count: 0,
+    exclude_patterns: [],
     notification_ids: [],
     notify_on_success: false,
     notify_on_failure: true,
@@ -109,6 +110,7 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
         zip_password: job.zip_password || '',
         retention_count: job.retention_count !== undefined ? job.retention_count : 0,
         local_retention_count: job.local_retention_count !== undefined ? job.local_retention_count : 0,
+        exclude_patterns: Array.isArray(job.exclude_patterns) ? job.exclude_patterns : [],
         notification_ids: Array.isArray(job.notification_ids) ? job.notification_ids : [],
         notify_on_success: job.notify_on_success ?? false,
         notify_on_failure: job.notify_on_failure ?? true,
@@ -174,6 +176,9 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
                     value={formData.source_path}
                     onChange={handleChange}
                     onFocus={() => setShowPathSuggestions(true)}
+                    // Hide suggestions on blur with a small delay so a click on
+                    // a suggestion still registers before the popup unmounts.
+                    onBlur={() => setTimeout(() => setShowPathSuggestions(false), 150)}
                     placeholder="/data/my-folder"
                     required
                   />
@@ -190,15 +195,29 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
               </div>
               {showPathSuggestions && (
                 <div className="mt-1 border rounded-md bg-background shadow-lg">
-                  <div className="p-2 text-xs font-medium text-muted-foreground border-b">
-                    Common paths:
+                  <div className="p-2 text-xs font-medium text-muted-foreground border-b flex items-center justify-between">
+                    <span>Common paths:</span>
+                    <button
+                      type="button"
+                      className="hover:text-foreground"
+                      // Use mousedown so the click fires before the input's
+                      // onBlur timeout removes the popup from the DOM.
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        setShowPathSuggestions(false)
+                      }}
+                      aria-label="Close suggestions"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
                   {COMMON_PATHS.map((path) => (
                     <button
                       key={path}
                       type="button"
                       className="w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors"
-                      onClick={() => {
+                      onMouseDown={(e) => {
+                        e.preventDefault()
                         setFormData(prev => ({ ...prev, source_path: path }))
                         setShowPathSuggestions(false)
                       }}
@@ -434,6 +453,29 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
               </p>
             </div>
 
+            <div>
+              <label className="text-sm font-medium mb-1 block">Exclude patterns</label>
+              <textarea
+                name="exclude_patterns"
+                value={(formData.exclude_patterns || []).join('\n')}
+                onChange={(e) => {
+                  // Split by newlines/commas, drop empties; keep order.
+                  const lines = e.target.value
+                    .split(/[\r\n,]+/)
+                    .map(s => s.trim())
+                    .filter(Boolean)
+                  setFormData(prev => ({ ...prev, exclude_patterns: lines }))
+                }}
+                placeholder={'.env\nmedia/**\n*.log'}
+                rows={4}
+                className="w-full px-3 py-2 bg-background border border-input rounded-md text-sm font-mono
+                  focus:outline-none focus:ring-2 focus:ring-primary/50 resize-y"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                One glob per line. Examples: <code>.env</code>, <code>media/**</code>, <code>*.log</code>, <code>node_modules</code>.
+              </p>
+            </div>
+
             {/* ── Notifications ──────────────────────────────────────── */}
             <div className="pt-2 border-t border-border">
               <label className="text-sm font-medium mb-2 flex items-center gap-1.5">
@@ -519,6 +561,13 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
       {showFileBrowser && (
         <FileBrowser
           multiSelect={true}
+          // Seed with the paths currently in the form so re-opening the browser
+          // preserves earlier selections instead of starting fresh.
+          initialSelected={
+            formData.source_path
+              ? formData.source_path.split(',').map(s => s.trim()).filter(Boolean)
+              : []
+          }
           onSelect={(paths) => {
             // If multiple paths selected, join them with commas
             const pathString = Array.isArray(paths) ? paths.join(',') : paths

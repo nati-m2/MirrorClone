@@ -3,6 +3,7 @@ import asyncio
 import shutil
 import tempfile
 import re
+import fnmatch
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Callable
@@ -17,6 +18,29 @@ class JobEngine:
         self.config_path = settings.rclone_config
         self.on_log = on_log
         self.running_jobs: dict[str, subprocess.Popen] = {}
+
+    @staticmethod
+    def _matches_exclude(rel_posix: str, name: str, patterns: list[str]) -> bool:
+        """Return True if a file/dir should be excluded based on glob patterns.
+
+        Each pattern is matched (using fnmatch) against both the basename and
+        the relative POSIX path. ``**`` is normalized to ``*`` so that simple
+        rclone-style patterns like ``media/**`` or ``**/.env`` keep working.
+        """
+        if not patterns:
+            return False
+        for raw in patterns:
+            pat = (raw or "").strip()
+            if not pat:
+                continue
+            # Normalize rclone-style ** to fnmatch-compatible *
+            norm = pat.replace("**", "*")
+            if fnmatch.fnmatch(name, norm) or fnmatch.fnmatch(rel_posix, norm):
+                return True
+            # Also exclude anything inside an excluded directory
+            if "/" not in norm and fnmatch.fnmatch(rel_posix.split("/", 1)[0], norm):
+                return True
+        return False
     
     async def execute_job(self, job: Job, on_progress=None) -> tuple[bool, str, int]:
         """Execute a backup job"""
@@ -38,7 +62,9 @@ class JobEngine:
                 loop = asyncio.get_event_loop()
                 zip_path = await loop.run_in_executor(
                     None,
-                    lambda: self._create_zip_multi(source_paths, job.name, job.zip_password)
+                    lambda: self._create_zip_multi(
+                        source_paths, job.name, job.zip_password, job.exclude_patterns or []
+                    )
                 )
                 if zip_path:
                     self._log(job.id, "progress", f"ZIP created: {zip_path}")
@@ -154,6 +180,12 @@ class JobEngine:
                 "--stats-one-line",
                 "-v",
             ]
+
+            # Apply user-defined exclude patterns (rclone-native filter syntax).
+            for pat in (job.exclude_patterns or []):
+                pat = (pat or "").strip()
+                if pat:
+                    cmd.extend(["--exclude", pat])
             
             loop = asyncio.get_event_loop()
             result_code, result_output = await loop.run_in_executor(
@@ -330,9 +362,15 @@ class JobEngine:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: self._cleanup_old_local_zips(job))
     
-    def _create_zip_multi(self, source_paths: list[str], job_name: str, password: Optional[str] = None) -> Optional[str]:
-        """Create ZIP archive from multiple source paths preserving structure"""
+    def _create_zip_multi(self, source_paths: list[str], job_name: str, password: Optional[str] = None, exclude_patterns: Optional[list[str]] = None) -> Optional[str]:
+        """Create ZIP archive from multiple source paths preserving structure.
+
+        ``exclude_patterns`` follows the same simple glob conventions as the
+        rclone path: matches against the basename or the path relative to the
+        copied source root (e.g. ``.env``, ``media/**``, ``*.log``).
+        """
         try:
+            patterns = exclude_patterns or []
             backups_dir = Path("/backups")
             backups_dir.mkdir(parents=True, exist_ok=True)
             
@@ -360,8 +398,33 @@ class JobEngine:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     
                     if source.is_dir():
-                        shutil.copytree(source, dest)
+                        # Build a copytree ignore callback that consults the
+                        # user's exclude patterns. Names are matched against the
+                        # basename and the path relative to the copied root.
+                        src_root = source
+
+                        def _ignore(dir_path, names, _root=src_root, _pats=patterns):
+                            if not _pats:
+                                return []
+                            try:
+                                rel_dir = Path(dir_path).resolve().relative_to(_root.resolve())
+                                rel_prefix = rel_dir.as_posix()
+                                if rel_prefix == ".":
+                                    rel_prefix = ""
+                            except Exception:
+                                rel_prefix = ""
+                            ignored = []
+                            for n in names:
+                                rel_posix = f"{rel_prefix}/{n}" if rel_prefix else n
+                                if self._matches_exclude(rel_posix, n, _pats):
+                                    ignored.append(n)
+                            return ignored
+
+                        shutil.copytree(source, dest, ignore=_ignore)
                     else:
+                        # Single file: skip if its name matches any pattern.
+                        if self._matches_exclude(source.name, source.name, patterns):
+                            continue
                         shutil.copy2(source, dest)
                 
                 # Create ZIP with or without password

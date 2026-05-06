@@ -73,18 +73,11 @@ services:
                                           # want to back up)
     environment:
       - TZ=Asia/Jerusalem
-      # Optional — SMTP for failure alerts
-      - SMTP_HOST=${SMTP_HOST:-}
-      - SMTP_PORT=${SMTP_PORT:-587}
-      - SMTP_USER=${SMTP_USER:-}
-      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
-      - SMTP_FROM=${SMTP_FROM:-}
-      # Optional — use your own Google OAuth client for a fully automatic
-      # redirect flow (otherwise the built-in rclone client ID is used and
-      # the user pastes the redirect URL manually).
-      # - GOOGLE_CLIENT_ID=your-client-id
-      # - GOOGLE_CLIENT_SECRET=your-client-secret
 ```
+
+> SMTP alerts and a custom Google OAuth client are configured **from inside
+> the app** (Settings screen) and persisted to `/config/app_settings.json` —
+> no environment variables required.
 
 ## Volumes
 
