@@ -1,0 +1,8 @@
+{
+  "Repository": "mirrorclone",
+  "Registry": "192.168.0.7:5000",
+  "Tag": "1.2.4",
+  "Build": true,
+  "Insecure": true,
+  "ExtraTags": ["latest"]
+}

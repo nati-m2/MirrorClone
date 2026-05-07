@@ -51,6 +51,20 @@
 .PARAMETER Login
   Force "docker login <Registry>" before pushing.
 
+.PARAMETER ConfigFile
+  Path to a JSON config file. Default: "docker-push.config.json" next to this script,
+  if it exists. Any field there acts as a default; CLI args always override.
+
+  Example contents:
+      {
+        "Repository": "mirrorclone",
+        "Registry":   "192.168.0.7:5000",
+        "Tag":        "1.2.4",
+        "Build":      true,
+        "Insecure":   true,
+        "ExtraTags":  ["stable"]
+      }
+
 .EXAMPLE
   ./scripts/docker-push-local.ps1 -SourceImage my-app:latest `
       -Registry 192.168.0.7:5000 -Repository my-app -Tag v1
@@ -65,27 +79,80 @@ param(
     [string]$SourceImage,
 
     # Default points to my private LAN registry; override per call if needed.
-    [string]$Registry = "192.168.0.7:5000",
+    [string]$Registry,
 
-    [Parameter(Mandatory = $true)]
     [string]$Repository,
 
-    [string]$Tag = "latest",
+    [string]$Tag,
 
-    [string[]]$ExtraTags = @(),
+    [string[]]$ExtraTags,
 
-    [switch]$NoLatest,
+    [Nullable[bool]]$NoLatest,
 
-    [switch]$Build,
-    [string]$BuildContext = (Get-Location).Path,
+    [Nullable[bool]]$Build,
+    [string]$BuildContext,
     [string]$Dockerfile,
 
-    [switch]$Insecure,
-    [switch]$SkipLogin,
-    [switch]$Login
+    [Nullable[bool]]$Insecure,
+    [Nullable[bool]]$SkipLogin,
+    [Nullable[bool]]$Login,
+
+    [string]$ConfigFile
 )
 
 $ErrorActionPreference = "Stop"
+
+# --- Load config file (JSON) ----------------------------------------------
+# CLI args always win. Any value not provided on CLI falls back to config,
+# and finally to hardcoded defaults below.
+$ConfigData = $null
+if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
+    $DefaultConfig = Join-Path $PSScriptRoot "docker-push.config.json"
+    if (Test-Path $DefaultConfig) { $ConfigFile = $DefaultConfig }
+}
+if ($ConfigFile) {
+    if (-not (Test-Path $ConfigFile)) {
+        Write-Error "Config file not found: $ConfigFile"
+        exit 1
+    }
+    try {
+        $ConfigData = Get-Content -Raw -Path $ConfigFile | ConvertFrom-Json
+    } catch {
+        Write-Error "Failed to parse JSON in '$ConfigFile': $_"
+        exit 1
+    }
+    Write-Host "Loaded config: $ConfigFile" -ForegroundColor DarkGray
+}
+
+function Resolve-Param {
+    param($CliValue, $ConfigKey, $Default)
+    # PSBoundParameters is the source of truth for "was this passed on CLI?"
+    if ($PSCmdlet -and $PSCmdlet.MyInvocation.BoundParameters.ContainsKey($ConfigKey)) {
+        return $CliValue
+    }
+    if ($ConfigData -and ($ConfigData.PSObject.Properties.Name -contains $ConfigKey)) {
+        return $ConfigData.$ConfigKey
+    }
+    return $Default
+}
+
+$Registry     = Resolve-Param $Registry     "Registry"     "192.168.0.7:5000"
+$Repository   = Resolve-Param $Repository   "Repository"   $null
+$Tag          = Resolve-Param $Tag          "Tag"          "latest"
+$SourceImage  = Resolve-Param $SourceImage  "SourceImage"  $null
+$ExtraTags    = Resolve-Param $ExtraTags    "ExtraTags"    @()
+$NoLatest     = [bool](Resolve-Param $NoLatest     "NoLatest"     $false)
+$Build        = [bool](Resolve-Param $Build        "Build"        $false)
+$BuildContext = Resolve-Param $BuildContext "BuildContext" (Get-Location).Path
+$Dockerfile   = Resolve-Param $Dockerfile   "Dockerfile"   $null
+$Insecure     = [bool](Resolve-Param $Insecure     "Insecure"     $false)
+$SkipLogin    = [bool](Resolve-Param $SkipLogin    "SkipLogin"    $false)
+$Login        = [bool](Resolve-Param $Login        "Login"        $false)
+
+if ([string]::IsNullOrWhiteSpace($Repository)) {
+    Write-Error "Repository is required (pass -Repository or set it in the config file)."
+    exit 1
+}
 
 # Validate docker is available
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
