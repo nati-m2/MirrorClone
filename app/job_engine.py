@@ -4,6 +4,9 @@ import shutil
 import tempfile
 import re
 import fnmatch
+import os
+import stat
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Callable
@@ -23,9 +26,8 @@ class JobEngine:
     def _matches_exclude(rel_posix: str, name: str, patterns: list[str]) -> bool:
         """Return True if a file/dir should be excluded based on glob patterns.
 
-        Each pattern is matched (using fnmatch) against both the basename and
-        the relative POSIX path. ``**`` is normalized to ``*`` so that simple
-        rclone-style patterns like ``media/**`` or ``**/.env`` keep working.
+        Each pattern is matched against the basename and the relative POSIX path.
+        Supports common rclone-style patterns including ``**`` wildcards.
         """
         if not patterns:
             return False
@@ -33,7 +35,28 @@ class JobEngine:
             pat = (raw or "").strip()
             if not pat:
                 continue
-            # Normalize rclone-style ** to fnmatch-compatible *
+            # Handle rclone-style ** patterns before falling back to fnmatch.
+            if "**" in pat:
+                if pat.endswith("/**"):
+                    prefix = pat[:-3].strip("/")
+                    if rel_posix == prefix or rel_posix.startswith(prefix + "/"):
+                        return True
+                    continue
+                if pat.startswith("**/"):
+                    suffix = pat[3:].strip("/")
+                    if name == suffix or rel_posix == suffix or rel_posix.endswith("/" + suffix):
+                        return True
+                    continue
+                if "/**/" in pat:
+                    prefix, suffix = pat.split("/**/", 1)
+                    prefix = prefix.strip("/")
+                    suffix = suffix.strip("/")
+                    if rel_posix.startswith(prefix + "/") and (
+                        name == suffix or rel_posix.endswith("/" + suffix)
+                    ):
+                        return True
+                    continue
+
             norm = pat.replace("**", "*")
             if fnmatch.fnmatch(name, norm) or fnmatch.fnmatch(rel_posix, norm):
                 return True
@@ -46,13 +69,14 @@ class JobEngine:
         """Execute a backup job"""
         if job.id in self.running_jobs:
             return False, "Job is already running", -1
-        
+
         self._log(job.id, "started", f"Starting backup: {job.name}")
-        
+        self.running_jobs[job.id] = None
+
         try:
             # Handle multiple source paths (comma-separated)
             source_paths = [p.strip() for p in job.source_path.split(',') if p.strip()]
-            
+
             # Create ZIP if needed
             if job.compress_before_upload:
                 self._log(job.id, "progress", "Creating ZIP archive...")
@@ -63,7 +87,7 @@ class JobEngine:
                 zip_path = await loop.run_in_executor(
                     None,
                     lambda: self._create_zip_multi(
-                        source_paths, job.name, job.zip_password, job.exclude_patterns or []
+                        source_paths, job.name, job.zip_password, job.exclude_patterns or [], job.preserve_links
                     )
                 )
                 if zip_path:
@@ -77,17 +101,32 @@ class JobEngine:
                 else:
                     self._log(job.id, "failed", "Failed to create ZIP archive", -1)
                     return False, "Failed to create ZIP archive", -1
-            
+
             # No ZIP - upload each path preserving structure
             if on_progress:
                 await on_progress("uploading", "Uploading files...", 0)
             return await self._upload_paths(job, source_paths, on_progress)
-            
+
         except Exception as e:
             error_msg = f"Exception during backup: {str(e)}"
             self._log(job.id, "failed", error_msg, -1, str(e))
             return False, error_msg, -1
+        finally:
+            self.running_jobs.pop(job.id, None)
     
+    def _rclone_perf_flags(self, job: Job) -> list[str]:
+        """Return performance-oriented flags for rclone copy commands."""
+        flags = [
+            "--fast-list",
+            "--transfers", "8",
+            "--checkers", "16",
+            "--buffer-size", "32M",
+        ]
+        # Larger chunks help Google Drive upload big archives.
+        if job.destination.split(":", 1)[0].lower() == "gdrive":
+            flags.extend(["--drive-chunk-size", "64M"])
+        return flags
+
     async def _upload_file(self, job: Job, file_path: str, on_progress=None) -> tuple[bool, str, int]:
         """Upload a single file to destination with date and time in folder name.
         Streams rclone progress via _run_rclone_with_progress to avoid pipe-buffer
@@ -104,12 +143,11 @@ class JobEngine:
             file_path,
             dest,
             "--config", str(self.config_path),
-            "--transfers", "4",
-            "--checkers", "8",
             "--stats", "1s",
             "--stats-one-line",
             "-v",
         ]
+        cmd.extend(self._rclone_perf_flags(job))
 
         self._log(job.id, "progress", f"Uploading to: {dest}")
 
@@ -118,7 +156,7 @@ class JobEngine:
         loop = asyncio.get_event_loop()
         result_code, result_output = await loop.run_in_executor(
             None,
-            lambda: self._run_rclone_with_progress(cmd, on_progress, loop)
+            lambda: self._run_rclone_with_progress(cmd, on_progress, loop, job.id)
         )
 
         if result_code == 0:
@@ -139,17 +177,20 @@ class JobEngine:
         dated_folder = f"{clean_name}-{date_str}"
         base_dest = f"{job.destination.rstrip('/')}/{dated_folder}"
         
-        # Calculate total size
+        # Calculate total size without following directory symlinks to avoid loops.
         total_size = 0
         for source_path in source_paths:
             path = Path(source_path)
-            if path.exists():
-                if path.is_file():
-                    total_size += path.stat().st_size
-                else:
-                    for f in path.rglob('*'):
-                        if f.is_file():
-                            total_size += f.stat().st_size
+            if not path.exists():
+                continue
+            if path.is_file():
+                total_size += path.stat().st_size
+            else:
+                for root, _dirs, files in os.walk(source_path, followlinks=False):
+                    for fname in files:
+                        fp = Path(root) / fname
+                        if fp.is_file():
+                            total_size += fp.stat().st_size
         
         size_mb = total_size / (1024 * 1024)
         self._log(job.id, "progress", f"Uploading {len(source_paths)} item(s) ({size_mb:.1f} MB) to {base_dest}")
@@ -174,12 +215,11 @@ class JobEngine:
                 base_dest,
                 "--config", str(self.config_path),
                 "--files-from", files_from_path,
-                "--transfers", "4",
-                "--checkers", "8",
                 "--stats", "1s",
                 "--stats-one-line",
                 "-v",
             ]
+            cmd.extend(self._rclone_perf_flags(job))
 
             # Apply user-defined exclude patterns (rclone-native filter syntax).
             for pat in (job.exclude_patterns or []):
@@ -190,9 +230,9 @@ class JobEngine:
             loop = asyncio.get_event_loop()
             result_code, result_output = await loop.run_in_executor(
                 None,
-                lambda: self._run_rclone_with_progress(cmd, on_progress, loop)
+                lambda: self._run_rclone_with_progress(cmd, on_progress, loop, job.id)
             )
-            
+
         finally:
             # Clean up temp file
             Path(files_from_path).unlink(missing_ok=True)
@@ -207,7 +247,7 @@ class JobEngine:
             self._log(job.id, "failed", f"Upload failed: {result_output}", result_code)
             return False, result_output, result_code
     
-    def _run_rclone_with_progress(self, cmd, on_progress, loop):
+    def _run_rclone_with_progress(self, cmd, on_progress, loop, job_id: Optional[str] = None):
         """Run rclone and parse progress"""
         process = subprocess.Popen(
             cmd,
@@ -216,30 +256,43 @@ class JobEngine:
             text=True,
             bufsize=1
         )
-        
+
+        if job_id is not None:
+            self.running_jobs[job_id] = process
+
         last_percent = -1
         output_lines = []
-        
-        for line in process.stdout:
-            output_lines.append(line)
-            # Parse rclone progress: "Transferred: 1.234 MiB / 5.678 MiB, 22%"
-            if '%' in line:
+
+        try:
+            for line in process.stdout:
+                output_lines.append(line)
+                # Parse rclone progress: "Transferred: 1.234 MiB / 5.678 MiB, 22%"
+                if '%' in line:
+                    try:
+                        percent_match = re.search(r'(\d+)%', line)
+                        if percent_match:
+                            percent = int(percent_match.group(1))
+                            if percent != last_percent:
+                                last_percent = percent
+                                if on_progress and loop:
+                                    asyncio.run_coroutine_threadsafe(
+                                        on_progress("uploading", f"Uploading files... {percent}%", percent),
+                                        loop
+                                    )
+                    except:
+                        pass
+
+            process.wait()
+            return (process.returncode, ''.join(output_lines))
+        finally:
+            if job_id is not None:
+                self.running_jobs.pop(job_id, None)
+            if process.poll() is None:
                 try:
-                    percent_match = re.search(r'(\d+)%', line)
-                    if percent_match:
-                        percent = int(percent_match.group(1))
-                        if percent != last_percent:
-                            last_percent = percent
-                            if on_progress and loop:
-                                asyncio.run_coroutine_threadsafe(
-                                    on_progress("uploading", f"Uploading files... {percent}%", percent),
-                                    loop
-                                )
-                except:
+                    process.terminate()
+                    process.wait(timeout=5)
+                except Exception:
                     pass
-        
-        process.wait()
-        return (process.returncode, ''.join(output_lines))
     
     def _cleanup_old_backups(self, job: Job, job_name_prefix: str):
         """Keep only the latest N backups"""
@@ -362,45 +415,142 @@ class JobEngine:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, lambda: self._cleanup_old_local_zips(job))
     
-    def _create_zip_multi(self, source_paths: list[str], job_name: str, password: Optional[str] = None, exclude_patterns: Optional[list[str]] = None) -> Optional[str]:
+    def _create_zip_multi(
+        self,
+        source_paths: list[str],
+        job_name: str,
+        password: Optional[str] = None,
+        exclude_patterns: Optional[list[str]] = None,
+        preserve_links: bool = True,
+    ) -> Optional[str]:
         """Create ZIP archive from multiple source paths preserving structure.
 
-        ``exclude_patterns`` follows the same simple glob conventions as the
-        rclone path: matches against the basename or the path relative to the
-        copied source root (e.g. ``.env``, ``media/**``, ``*.log``).
+        For non-password archives the source tree is zipped directly; there is no
+        intermediate copy to a temporary directory. This roughly halves disk I/O
+        for large backups. Password-protected archives fall back to the legacy
+        temp-copy path because 7z handles exclusions and encryption for us.
         """
+        if password:
+            return self._create_zip_multi_legacy(
+                source_paths, job_name, password, exclude_patterns or [], preserve_links
+            )
+
         try:
             patterns = exclude_patterns or []
             backups_dir = Path("/backups")
             backups_dir.mkdir(parents=True, exist_ok=True)
-            
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Clean job name for filename
             clean_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in job_name)
             zip_name = f"{clean_name}_{timestamp}"
             zip_path = backups_dir / f"{zip_name}.zip"
-            
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp_path = Path(tmpdir)
-                
+
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
                 for source_path_str in source_paths:
                     source = Path(source_path_str)
                     if not source.exists():
                         continue
-                    
-                    # Preserve directory structure from /data
+
+                    src_str = str(source)
+                    if src_str.startswith('/data/'):
+                        zip_base = Path('/data')
+                    else:
+                        zip_base = source.parent
+
+                    # Exclusion patterns are evaluated relative to the selected
+                    # source root (e.g. /data/hermes), while archive paths keep
+                    # the broader /data or source.parent structure.
+                    exclude_base = source if source.is_dir() else source.parent
+
+                    def _zip_rel(entry: Path) -> str:
+                        return entry.relative_to(zip_base).as_posix()
+
+                    def _excl_rel(entry: Path) -> str:
+                        return entry.relative_to(exclude_base).as_posix()
+
+                    if source.is_dir():
+                        for dirpath, dirnames, filenames in os.walk(source, followlinks=False):
+                            dir_path = Path(dirpath)
+
+                            # Prune excluded directories before descending into them.
+                            keep = []
+                            for d in dirnames:
+                                child = dir_path / d
+                                rel_posix = _excl_rel(child)
+                                if not self._matches_exclude(rel_posix, d, patterns):
+                                    keep.append(d)
+                            dirnames[:] = keep
+
+                            for name in filenames:
+                                file_path = dir_path / name
+                                rel_posix = _excl_rel(file_path)
+                                if self._matches_exclude(rel_posix, name, patterns):
+                                    continue
+
+                                arc = _zip_rel(file_path)
+                                if preserve_links and file_path.is_symlink():
+                                    target = os.readlink(file_path)
+                                    info = zipfile.ZipInfo(filename=arc)
+                                    info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                                    info.compress_type = zipfile.ZIP_STORED
+                                    zf.writestr(info, target)
+                                elif file_path.is_file():
+                                    zf.write(file_path, arc)
+                    else:
+                        rel_posix = _excl_rel(source)
+                        if self._matches_exclude(rel_posix, source.name, patterns):
+                            continue
+
+                        arc = _zip_rel(source)
+                        if preserve_links and source.is_symlink():
+                            target = os.readlink(source)
+                            info = zipfile.ZipInfo(filename=arc)
+                            info.external_attr = (stat.S_IFLNK | 0o777) << 16
+                            info.compress_type = zipfile.ZIP_STORED
+                            zf.writestr(info, target)
+                        elif source.is_file():
+                            zf.write(source, arc)
+
+            return str(zip_path)
+        except Exception as e:
+            print(f"Error creating ZIP: {e}")
+            return None
+
+    def _create_zip_multi_legacy(
+        self,
+        source_paths: list[str],
+        job_name: str,
+        password: str,
+        patterns: list[str],
+        preserve_links: bool,
+    ) -> Optional[str]:
+        """Legacy temp-copy ZIP creation, kept for password-protected archives."""
+        try:
+            backups_dir = Path("/backups")
+            backups_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            clean_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in job_name)
+            zip_name = f"{clean_name}_{timestamp}"
+            zip_path = backups_dir / f"{zip_name}.zip"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+
+                for source_path_str in source_paths:
+                    source = Path(source_path_str)
+                    if not source.exists():
+                        continue
+
                     if str(source).startswith('/data/'):
                         relative = source.relative_to('/data')
                         dest = tmp_path / relative
                     else:
                         dest = tmp_path / source.name
-                    
+
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    
+
                     if source.is_dir():
-                        # Build a copytree ignore callback that consults the
-                        # user's exclude patterns. Names are matched against the
-                        # basename and the path relative to the copied root.
                         src_root = source
 
                         def _ignore(dir_path, names, _root=src_root, _pats=patterns):
@@ -420,30 +570,27 @@ class JobEngine:
                                     ignored.append(n)
                             return ignored
 
-                        shutil.copytree(source, dest, ignore=_ignore)
+                        shutil.copytree(
+                            source, dest, ignore=_ignore, symlinks=preserve_links,
+                            ignore_dangling_symlinks=True
+                        )
                     else:
-                        # Single file: skip if its name matches any pattern.
                         if self._matches_exclude(source.name, source.name, patterns):
                             continue
-                        shutil.copy2(source, dest)
-                
-                # Create ZIP with or without password
-                if password:
-                    # Use 7z for password-protected ZIP with AES encryption
-                    cmd = [
-                        "7z", "a", "-tzip", "-mx=5",
-                        f"-p{password}",
-                        "-mem=AES256",
-                        str(zip_path),
-                        "."
-                    ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path))
-                    if result.returncode != 0:
-                        print(f"7z error: {result.stderr}")
-                        return None
-                else:
-                    shutil.make_archive(str(backups_dir / zip_name), 'zip', tmp_path)
-            
+                        shutil.copy2(source, dest, follow_symlinks=not preserve_links)
+
+                cmd = [
+                    "7z", "a", "-tzip", "-mx=5",
+                    f"-p{password}",
+                    "-mem=AES256",
+                    str(zip_path),
+                    "."
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(tmp_path))
+                if result.returncode != 0:
+                    print(f"7z error: {result.stderr}")
+                    return None
+
             return str(zip_path)
         except Exception as e:
             print(f"Error creating ZIP: {e}")
@@ -469,12 +616,12 @@ class JobEngine:
     def stop_job(self, job_id: str) -> bool:
         """Stop a running job"""
         if job_id in self.running_jobs:
-            process = self.running_jobs[job_id]
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-            del self.running_jobs[job_id]
+            process = self.running_jobs.pop(job_id)
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
             return True
         return False

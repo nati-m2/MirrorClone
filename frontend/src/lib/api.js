@@ -77,6 +77,7 @@ export const listRestoreBackups = (refresh = false) =>
 export const browseBackup = (backupPath, subPath = '') =>
   api.get('/restore/browse', { params: { backup_path: backupPath, sub_path: subPath } })
 export const executeRestore = (payload) => api.post('/restore/execute', payload)
+export const deleteRestoreBackup = (payload) => api.delete('/restore/delete', { data: payload })
 export const listRestoreDestinations = () => api.get('/restore/destinations')
 
 export default api

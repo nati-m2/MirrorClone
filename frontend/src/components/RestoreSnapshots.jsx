@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import {
   FileArchive, Folder, Lock, Cloud, Server, RefreshCw, RotateCcw,
-  AlertTriangle, Loader2, HardDrive, Search
+  AlertTriangle, Loader2, HardDrive, Search, Trash2
 } from 'lucide-react'
 import Button from './ui/Button'
-import { listRestoreBackups } from '../lib/api'
+import { listRestoreBackups, deleteRestoreBackup } from '../lib/api'
 
 /**
  * Restore tab: flat grid of every available snapshot (remote + local),
@@ -33,7 +33,7 @@ const formatTimestamp = (ts) => {
   return ts.replace('T', ' ')
 }
 
-const SnapshotCard = ({ snap, onRestore }) => {
+const SnapshotCard = ({ snap, onRestore, onDelete, deleting }) => {
   const isLocal = snap.source === 'local'
   const formatLabel = snap.compressed ? 'ZIP' : 'Folder'
   const size = formatSize(snap.size_mb)
@@ -107,8 +107,18 @@ const SnapshotCard = ({ snap, onRestore }) => {
         </div>
       </div>
 
-      {/* Restore action */}
-      <div className="mt-3 flex justify-end">
+      {/* Actions */}
+      <div className="mt-3 flex justify-end gap-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => onDelete(snap)}
+          disabled={deleting}
+          className="flex items-center gap-1 h-7 px-3 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+          Delete
+        </Button>
         <Button
           size="sm"
           onClick={() => onRestore(snap)}
@@ -128,6 +138,7 @@ const RestoreSnapshots = ({ onRestore }) => {
   const [groups, setGroups] = useState([])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('all') // all | local | cloud | encrypted
+  const [deleting, setDeleting] = useState(null)
 
   const fetchBackups = async (refresh = false) => {
     setLoading(true)
@@ -139,6 +150,23 @@ const RestoreSnapshots = ({ onRestore }) => {
       setError(e.response?.data?.detail || 'Failed to load backups')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleDelete = async (snap) => {
+    const label = snap.display || snap.timestamp || snap.path
+    if (!window.confirm(`Delete backup "${label}"? This cannot be undone.`)) {
+      return
+    }
+    const key = `${snap.source}:${snap.path}`
+    setDeleting(key)
+    try {
+      await deleteRestoreBackup({ source: snap.source, path: snap.path })
+      await fetchBackups(true)
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to delete backup')
+    } finally {
+      setDeleting(null)
     }
   }
 
@@ -274,6 +302,8 @@ const RestoreSnapshots = ({ onRestore }) => {
               key={`${snap.source}:${snap.path}`}
               snap={snap}
               onRestore={onRestore}
+              onDelete={handleDelete}
+              deleting={deleting === `${snap.source}:${snap.path}`}
             />
           ))}
         </div>

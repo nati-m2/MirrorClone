@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 import asyncio
 import json
+import shutil
 
 from app.config import settings
 
@@ -1188,6 +1189,73 @@ async def list_restore_backups(refresh: bool = False):
     _RESTORE_LIST_CACHE["value"] = response
     _RESTORE_LIST_CACHE["ts"] = _time.time()
     return response
+
+
+@app.delete("/api/restore/delete")
+async def delete_restore_backup(request: dict):
+    """Delete a single backup snapshot.
+
+    Body: {"source": "local" | "remote" | "remote_scan", "path": "..."}
+    """
+    source = request.get("source")
+    path = request.get("path")
+    if not source or not path:
+        raise HTTPException(status_code=400, detail="source and path are required")
+
+    if source == "local":
+        p = Path(path)
+        try:
+            resolved = p.resolve()
+        except (OSError, RuntimeError):
+            resolved = p.absolute()
+        backups_dir = Path("/backups")
+        if resolved == backups_dir:
+            raise HTTPException(status_code=400, detail="Invalid local path")
+        try:
+            resolved.relative_to(backups_dir)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid local path")
+        if not resolved.exists():
+            raise HTTPException(status_code=404, detail="Backup not found")
+        try:
+            if resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"Failed to delete backup: {e}")
+
+    elif source in ("remote", "remote_scan"):
+        if not auth_manager.config_path.exists():
+            raise HTTPException(status_code=500, detail="rclone config not found")
+
+        # Only allow deleting paths under configured job destinations or the
+        # self-backup root so arbitrary rclone purge cannot be abused.
+        allowed_prefixes = {
+            j.destination.rstrip('/') + '/' for j in job_manager.get_all_jobs()
+        }
+        allowed_prefixes.add(f"{self_backup.remote_name}:{self_backup.backup_folder}/")
+        allowed_prefixes.add(f"{self_backup.remote_name}:{self_backup.backup_folder}")
+        if not any(path.startswith(prefix) for prefix in allowed_prefixes):
+            raise HTTPException(status_code=400, detail="Invalid remote path")
+
+        import subprocess
+        result = subprocess.run(
+            ["rclone", "purge", path, "--config", str(auth_manager.config_path)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete remote backup: {result.stderr}"
+            )
+    else:
+        raise HTTPException(status_code=400, detail="Invalid source")
+
+    _RESTORE_LIST_CACHE["value"] = None
+    return {"success": True}
 
 
 def _browse_local_zip(zip_path: Path, backup_path: str, sub_path: str, source_label: str = "local"):
