@@ -1,11 +1,15 @@
 <#
 .SYNOPSIS
-  Generic script: tag a local Docker image and push it to a private/local registry.
+  Generic script: tag a local Docker image and push it to a private/local registry
+  and optionally to Docker Hub in the same run.
 
 .DESCRIPTION
   Wraps the standard flow:
       docker tag  <SourceImage>  <Registry>/<Repository>:<Tag>
       docker push                <Registry>/<Repository>:<Tag>
+
+  When Docker Hub is enabled, the same built image is also tagged & pushed to
+  <HubUser>/<HubRepository>:<Tag>.
 
   Works for any project / any image. Nothing here is MirrorClone-specific.
 
@@ -51,18 +55,33 @@
 .PARAMETER Login
   Force "docker login <Registry>" before pushing.
 
+.PARAMETER PushToHub
+  Also push the image to Docker Hub. If omitted and not set in config,
+  the script prompts (default answer: No).
+
+.PARAMETER HubUser
+  Docker Hub username. Falls back to config key "user" or env var DOCKERHUB_USER.
+
+.PARAMETER HubRepository
+  Docker Hub repository name. Defaults to the same value as -Repository.
+
+.PARAMETER SkipHubLogin
+  Skip the Docker Hub "docker login" step. Useful if already logged in.
+
 .PARAMETER ConfigFile
   Path to a JSON config file. Default: "docker-push.config.json" next to this script,
   if it exists. Any field there acts as a default; CLI args always override.
 
   Example contents:
       {
-        "Repository": "mirrorclone",
-        "Registry":   "192.168.0.7:5000",
-        "Tag":        "1.2.4",
-        "Build":      true,
-        "Insecure":   true,
-        "ExtraTags":  ["stable"]
+        "Repository":   "mirrorclone",
+        "Registry":     "192.168.0.7:5000",
+        "Tag":          "1.2.4",
+        "Build":        true,
+        "Insecure":     true,
+        "ExtraTags":    ["stable"],
+        "user":         "natim2",
+        "PushToHub":    false
       }
 
 .EXAMPLE
@@ -72,6 +91,9 @@
 .EXAMPLE
   ./scripts/docker-push-local.ps1 -Registry registry.local:5000 `
       -Repository mirrorclone -Tag 1.0.0 -ExtraTags latest
+
+.EXAMPLE
+  ./scripts/docker-push-local.ps1 -PushToHub -HubUser nati -Tag 1.3.0
 #>
 
 [CmdletBinding()]
@@ -96,6 +118,11 @@ param(
     [Nullable[bool]]$Insecure,
     [Nullable[bool]]$SkipLogin,
     [Nullable[bool]]$Login,
+
+    [Nullable[bool]]$PushToHub,
+    [string]$HubUser,
+    [string]$HubRepository,
+    [Nullable[bool]]$SkipHubLogin,
 
     [string]$ConfigFile
 )
@@ -149,6 +176,17 @@ $Insecure     = [bool](Resolve-Param $Insecure     "Insecure"     $false)
 $SkipLogin    = [bool](Resolve-Param $SkipLogin    "SkipLogin"    $false)
 $Login        = [bool](Resolve-Param $Login        "Login"        $false)
 
+# Docker Hub resolution
+$PushToHub      = Resolve-Param $PushToHub      "PushToHub"      $null
+$HubUser        = Resolve-Param $HubUser        "HubUser"        $env:DOCKERHUB_USER
+$HubRepository = Resolve-Param $HubRepository "HubRepository" $Repository
+$SkipHubLogin   = [bool](Resolve-Param $SkipHubLogin   "SkipHubLogin"   $false)
+
+if ($null -eq $PushToHub) {
+    $answer = Read-Host "Push to Docker Hub as well? [y/N]"
+    $PushToHub = $answer -match '^[Yy]'
+}
+
 if ([string]::IsNullOrWhiteSpace($Repository)) {
     Write-Error "Repository is required (pass -Repository or set it in the config file)."
     exit 1
@@ -182,12 +220,19 @@ if (-not $NoLatest -and $Tag -ne "latest") {
 }
 $AllTags = $AllTags | Select-Object -Unique
 
+if ($PushToHub -and [string]::IsNullOrWhiteSpace($HubUser)) {
+    Write-Error "Docker Hub username is required for -PushToHub (set 'HubUser' / 'user' in config, env DOCKERHUB_USER, or pass -HubUser)."
+    exit 1
+}
+
 Write-Host ""
-Write-Host "=== Docker push to local registry ===" -ForegroundColor Cyan
+Write-Host "=== Docker push ===" -ForegroundColor Cyan
 Write-Host "Source image : $SourceImage"
-Write-Host "Registry     : $Registry"
-Write-Host "Repository   : $Repository"
+Write-Host "Local registry: $Registry/$Repository"
 Write-Host "Tags         : $($AllTags -join ', ')"
+if ($PushToHub) {
+    Write-Host "Docker Hub   : $HubUser/$HubRepository (login required)" -ForegroundColor Cyan
+}
 if ($Build) {
     Write-Host "Build        : yes (context=$BuildContext)"
 }
@@ -197,7 +242,7 @@ if ($Insecure) {
 }
 Write-Host ""
 
-# Optional login
+# Optional local registry login
 if ($Login -and -not $SkipLogin) {
     Write-Host "--> docker login $Registry" -ForegroundColor Yellow
     docker login $Registry
@@ -237,7 +282,32 @@ foreach ($t in $AllTags) {
     Write-Host ""
 }
 
+if ($PushToHub) {
+    if (-not $SkipHubLogin) {
+        Write-Host "--> docker login (Docker Hub)" -ForegroundColor Yellow
+        docker login
+        if ($LASTEXITCODE -ne 0) { throw "docker login failed for Docker Hub." }
+    }
+
+    foreach ($t in $AllTags) {
+        $HubRef = "$HubUser/${HubRepository}:${t}"
+
+        Write-Host "--> docker tag $SourceImage $HubRef" -ForegroundColor Yellow
+        docker tag $SourceImage $HubRef
+        if ($LASTEXITCODE -ne 0) { throw "docker tag failed for $HubRef." }
+
+        Write-Host "--> docker push $HubRef" -ForegroundColor Yellow
+        docker push $HubRef
+        if ($LASTEXITCODE -ne 0) { throw "docker push failed for $HubRef." }
+
+        Write-Host ""
+    }
+}
+
 Write-Host "Done. Pushed:" -ForegroundColor Green
 foreach ($t in $AllTags) {
     Write-Host "  - $Registry/${Repository}:${t}"
+    if ($PushToHub) {
+        Write-Host "  - $HubUser/${HubRepository}:${t}"
+    }
 }
