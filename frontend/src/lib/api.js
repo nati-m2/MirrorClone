@@ -4,6 +4,21 @@ const api = axios.create({
   baseURL: '/api',
 })
 
+// 401 interceptor — redirect to login when session expires.
+// Skip for /auth/* endpoints to avoid redirect loops.
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (
+      error.response?.status === 401 &&
+      !error.config?.url?.startsWith('/auth/')
+    ) {
+      window.location.reload()
+    }
+    return Promise.reject(error)
+  }
+)
+
 export const getStatus = () => api.get('/status')
 export const getRemotes = () => api.get('/config/remotes')
 export const getRemotesDetailed = () => api.get('/config/remotes/detailed')
@@ -16,7 +31,11 @@ export const uploadConfig = (file) => {
   return api.post('/config/upload', formData)
 }
 export const downloadConfig = () => api.get('/config/download')
-export const testRemote = (remoteName) => api.post(`/config/test/${remoteName}`)
+// `restore: true` lets the backend pull jobs.json back from this remote when
+// none exist locally — only for explicit user actions in Connections, never
+// for the dashboard's background probes. The admin password is never involved.
+export const testRemote = (remoteName, { restore = false } = {}) =>
+  api.post(`/config/test/${remoteName}`, null, { params: restore ? { restore: true } : {} })
 
 export const getJobs = () => api.get('/jobs')
 export const getJob = (jobId) => api.get(`/jobs/${jobId}`)
@@ -79,5 +98,14 @@ export const browseBackup = (backupPath, subPath = '') =>
 export const executeRestore = (payload) => api.post('/restore/execute', payload)
 export const deleteRestoreBackup = (payload) => api.delete('/restore/delete', { data: payload })
 export const listRestoreDestinations = () => api.get('/restore/destinations')
+
+// Auth
+export const getAuthStatus = () => api.get('/auth/status')
+export const authSetup = (password) => api.post('/auth/setup', { password })
+export const authLogin = (password) => api.post('/auth/login', { password })
+export const authChangePassword = (current_password, new_password) =>
+  api.post('/auth/password', { current_password, new_password })
+export const authLogout = () => api.post('/auth/logout')
+export const deleteAuthProfile = () => api.delete('/auth/profile')
 
 export default api

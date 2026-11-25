@@ -1,7 +1,8 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse, JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime
@@ -9,6 +10,7 @@ from typing import Optional
 import asyncio
 import json
 import shutil
+import time
 
 from app.config import settings
 
@@ -52,6 +54,7 @@ from app.app_settings_manager import (
     GoogleDriveCredentials,
     GoogleDriveCredentialsUpdate,
 )
+from app.auth_profile_manager import AuthProfileManager
 
 
 job_manager = JobManager()
@@ -61,6 +64,7 @@ notifications_manager = NotificationsManager()
 guardian = Guardian(notifications_manager=notifications_manager)
 job_engine = JobEngine(on_log=job_manager.add_log)
 self_backup = SelfBackup()
+auth_profile = AuthProfileManager()
 
 
 async def execute_job_wrapper(job_id: str):
@@ -128,6 +132,13 @@ scheduler = JobScheduler(on_job_execute=execute_job_wrapper)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.start()
+
+    # A job marked RUNNING on disk cannot still be running: the engine keeps
+    # its rclone processes in memory, so a restart mid-run leaves a stale
+    # status that nothing can clear. Flip those to FAILED before scheduling.
+    interrupted = job_manager.reconcile_running_jobs()
+    for job_id in interrupted:
+        print(f"Marked interrupted job {job_id} as failed (service restarted mid-run)")
     
     for job in job_manager.get_all_jobs():
         if job.enabled:
@@ -157,6 +168,176 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Auth middleware ────────────────────────────────────────────────────────────
+# Routes that are always accessible (no JWT required).
+_PUBLIC_PREFIXES = (
+    "/api/auth/",        # login, status, setup, Google Drive OAuth callback
+    "/api/events",       # SSE stream (used by frontend before auth check)
+    "/assets/",          # static frontend assets
+)
+_PUBLIC_EXACT = {"/", "/login", "/api/status", "/api/settings/google-drive"}
+# Carved out of _PUBLIC_PREFIXES: these live under /api/auth/ but must never
+# be reachable without a session, or anyone could unlock the instance.
+_PROTECTED_EXACT = {"/api/auth/profile", "/api/auth/password"}
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+
+        # Always allow public routes and non-API frontend routes.
+        if path not in _PROTECTED_EXACT and (
+            path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+        ):
+            return await call_next(request)
+
+        # Non-API paths (SPA catch-all) are always allowed — the frontend
+        # itself enforces the login redirect.
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        # Setup mode: no profile exists → everything open.
+        if auth_profile.setup_mode:
+            return await call_next(request)
+
+        # Profile exists → require valid JWT cookie.
+        token = request.cookies.get(auth_profile.cookie_name())
+        if not token:
+            return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+        if not auth_profile.verify_token(token):
+            return JSONResponse(status_code=401, content={"detail": "Invalid or expired session"})
+
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
+
+# ── Auth API endpoints ────────────────────────────────────────────────────────
+# Failed-login throttle: consecutive bad passwords lock the endpoint for a
+# short window. In-memory only — a restart clears it, which is fine since the
+# point is to make online guessing slow, not to be a durable ban list.
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_LOCKOUT_SECONDS = 60
+_login_state: dict = {"failures": 0, "locked_until": 0.0}
+
+
+def _set_session_cookie(response: JSONResponse, token: str) -> JSONResponse:
+    response.set_cookie(
+        key=auth_profile.cookie_name(),
+        value=token,
+        max_age=auth_profile.cookie_max_age(),
+        httponly=True,
+        samesite="lax",
+        secure=False,  # Set True when behind HTTPS reverse proxy
+    )
+    return response
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    """Return current authentication state for the frontend."""
+    if auth_profile.setup_mode:
+        return {"setup_mode": True, "authenticated": False}
+
+    token = request.cookies.get(auth_profile.cookie_name())
+    authenticated = bool(token and auth_profile.verify_token(token))
+    return {"setup_mode": False, "authenticated": authenticated}
+
+
+@app.post("/api/auth/setup")
+async def auth_setup(payload: dict):
+    """Set the admin password during first-time setup.
+
+    Body: {"password": "..."}
+    Only works while no password is configured (setup mode).
+    """
+    if not auth_profile.setup_mode:
+        raise HTTPException(status_code=400, detail="Password already set")
+
+    password = payload.get("password") or ""
+    if len(password) < auth_profile.min_password_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {auth_profile.min_password_length} characters",
+        )
+
+    auth_profile.create_profile(password)
+    token = auth_profile.create_token()
+
+    return _set_session_cookie(JSONResponse(content={"message": "Password set"}), token)
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: dict):
+    """Log in with the admin password. Body: {"password": "..."}"""
+    if auth_profile.setup_mode:
+        raise HTTPException(status_code=400, detail="No password configured — run setup first")
+
+    now = time.time()
+    if now < _login_state["locked_until"]:
+        wait = int(_login_state["locked_until"] - now) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed attempts — try again in {wait}s",
+        )
+
+    password = payload.get("password") or ""
+    if not auth_profile.check_password(password):
+        _login_state["failures"] += 1
+        if _login_state["failures"] >= _LOGIN_MAX_ATTEMPTS:
+            _login_state["locked_until"] = now + _LOGIN_LOCKOUT_SECONDS
+            _login_state["failures"] = 0
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    _login_state["failures"] = 0
+    _login_state["locked_until"] = 0.0
+    token = auth_profile.create_token()
+    return _set_session_cookie(JSONResponse(content={"message": "Logged in"}), token)
+
+
+@app.post("/api/auth/password")
+async def auth_change_password(payload: dict):
+    """Change the admin password. Requires a valid session (see _PROTECTED_EXACT).
+
+    Body: {"current_password": "...", "new_password": "..."}
+    Rotating the hash keeps the same jwt_secret, so existing sessions survive.
+    """
+    if auth_profile.setup_mode:
+        raise HTTPException(status_code=400, detail="No password configured — run setup first")
+
+    if not auth_profile.check_password(payload.get("current_password") or ""):
+        raise HTTPException(status_code=403, detail="Current password is incorrect")
+
+    new_password = payload.get("new_password") or ""
+    if len(new_password) < auth_profile.min_password_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {auth_profile.min_password_length} characters",
+        )
+
+    auth_profile.create_profile(new_password)
+    return {"message": "Password changed"}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout():
+    """Clear the session cookie."""
+    response = JSONResponse(content={"message": "Logged out"})
+    response.delete_cookie(key=auth_profile.cookie_name())
+    return response
+
+
+@app.delete("/api/auth/profile")
+async def auth_delete_profile():
+    """Delete the auth profile (returns to setup mode). Requires a session."""
+    auth_profile.delete_profile()
+    response = JSONResponse(content={"message": "Profile deleted — setup mode active"})
+    response.delete_cookie(key=auth_profile.cookie_name())
+    return response
 
 
 # Cache for the usage stats — both local scan and rclone about/size calls are
@@ -500,20 +681,25 @@ async def download_config():
 
 
 @app.post("/api/config/test/{remote_name}")
-async def test_remote(remote_name: str):
+async def test_remote(remote_name: str, restore: bool = False):
     """Test remote connection.
 
-    On a successful test, if there are no jobs configured locally yet,
-    attempt to pull `jobs.json` from `<remote_name>:MirrorCloneBackups/
-    mirrorclone-config/` so the user gets back in sync with any previous
-    instance that backed up to the same cloud. Only `jobs.json` is copied —
-    we never overwrite the freshly added rclone.conf.
+    With `restore=true` (the Connections screen, where the user is explicitly
+    hooking this instance up to a remote) a successful test also pulls
+    `jobs.json` back from `<remote_name>:MirrorCloneBackups/mirrorclone-config/`
+    when no jobs exist locally, so a fresh container recovers its schedule.
+
+    Without the flag the call is a pure connectivity probe — the dashboard
+    polls it for every remote on load, and side effects there are surprising.
+
+    The admin password is never part of this: auth_profile.json is not backed
+    up to cloud, so a fresh container always starts by asking for a new one.
     """
     success, message = auth_manager.test_remote(remote_name)
     jobs_restored = 0
     restore_message = None
 
-    if success and len(job_manager.get_all_jobs()) == 0:
+    if restore and success and len(job_manager.get_all_jobs()) == 0:
         ok, restore_message = await self_backup.restore_jobs_only(remote_name)
         if ok:
             jobs_restored = job_manager.reload()
@@ -770,9 +956,15 @@ async def stop_job(job_id: str):
     success = job_engine.stop_job(job_id)
     if success:
         job_manager.update_job_status(job_id, JobStatus.IDLE, "Job stopped by user")
+        await broadcaster.broadcast("job_updated", {"job_id": job_id})
         return {"message": "Job stopped successfully"}
-    else:
-        raise HTTPException(status_code=400, detail="Failed to stop job")
+
+    # Marked RUNNING but the engine has no process for it: the record is stale
+    # (the service restarted mid-run). Clear it instead of failing the request,
+    # otherwise the job can never be stopped from the UI.
+    job_manager.update_job_status(job_id, JobStatus.IDLE, "Stale running status cleared")
+    await broadcaster.broadcast("job_updated", {"job_id": job_id})
+    return {"message": "Job was not running anymore; status cleared"}
 
 
 @app.post("/api/jobs/{job_id}/reset")

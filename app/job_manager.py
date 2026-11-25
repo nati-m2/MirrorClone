@@ -94,6 +94,26 @@ class JobManager:
             return True
         return False
     
+    def reconcile_running_jobs(self) -> list[str]:
+        """Clear RUNNING statuses left behind by a previous process.
+
+        The engine tracks live rclone processes in memory only, so a job that
+        was mid-run when the container stopped stays RUNNING on disk forever,
+        and /stop then fails because there is no process to kill. At startup
+        nothing can legitimately be running yet, so flip those to FAILED.
+        last_run is left as it was: it belongs to the interrupted run.
+        """
+        interrupted = []
+        for job in self.jobs.values():
+            if job.status == JobStatus.RUNNING:
+                job.status = JobStatus.FAILED
+                job.last_error = "Interrupted: the service restarted while this job was running"
+                interrupted.append(job.id)
+
+        if interrupted:
+            self._save_jobs()
+        return interrupted
+
     def update_job_status(self, job_id: str, status: JobStatus, 
                          last_error: Optional[str] = None, duration: Optional[int] = None):
         """Update job status"""

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, RefreshCw, Database, RotateCcw, HardDrive, Settings as SettingsIcon } from 'lucide-react'
+import { Plus, RefreshCw, Database, RotateCcw, HardDrive, Settings as SettingsIcon, LogOut } from 'lucide-react'
 import JobCard from './components/JobCard'
 import BackupStatistics from './components/BackupStatistics'
 import JobDialog from './components/JobDialog'
@@ -7,8 +7,10 @@ import ConnectionsManager from './components/ConnectionsManager'
 import RestoreWizard from './components/RestoreWizard'
 import RestoreSnapshots from './components/RestoreSnapshots'
 import ReconnectDialog from './components/ReconnectDialog'
+import LoginPage from './components/LoginPage'
+import SetupProfilePrompt from './components/SetupProfilePrompt'
 import Button from './components/ui/Button'
-import {
+import api, {
   getStatus,
   getJobs,
   createJob,
@@ -28,6 +30,11 @@ function App() {
   const [editingJob, setEditingJob] = useState(null)
   const [showConfig, setShowConfig] = useState(false)
   const [jobProgress, setJobProgress] = useState({}) // { jobId: { stage, message, percent } }
+
+  // ── Auth state ──
+  const [authChecked, setAuthChecked] = useState(false)
+  const [setupMode, setSetupMode] = useState(false)
+  const [authenticated, setAuthenticated] = useState(false)
   const [activeTab, setActiveTab] = useState('backup') // 'backup' | 'restore'
   const [showRestoreWizard, setShowRestoreWizard] = useState(false)
   // When a snapshot card is clicked we open the wizard pre-populated with it.
@@ -83,8 +90,31 @@ function App() {
     }
   }, [])
 
-  // On mount: fire status + jobs + remote-status checks in PARALLEL.
+  // Auth check — runs once on mount, before anything else.
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const authRes = await api.get('/auth/status')
+        if (cancelled) return
+        const { setup_mode, authenticated: authed } = authRes.data
+        setSetupMode(setup_mode)
+        setAuthenticated(authed)
+        setAuthChecked(true)
+      } catch (e) {
+        console.error('Auth check failed:', e)
+        // If auth endpoint is unreachable, assume setup mode (old backend without auth)
+        setSetupMode(true)
+        setAuthenticated(false)
+        setAuthChecked(true)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // On mount (after auth): fire status + jobs + remote-status checks in PARALLEL.
+  useEffect(() => {
+    if (!authChecked || (!setupMode && !authenticated)) return
     let cancelled = false
     ;(async () => {
       try {
@@ -107,7 +137,7 @@ function App() {
       }
     })()
     return () => { cancelled = true }
-  }, [refreshRemoteStatuses])
+  }, [authChecked, setupMode, authenticated, refreshRemoteStatuses])
 
   // Refs avoid stale closures inside the SSE handler.
   const fetchingRef = useRef(false)
@@ -253,6 +283,38 @@ function App() {
     }
   }
 
+  const handleLogout = async () => {
+    try {
+      await api.post('/auth/logout')
+    } catch { /* ignore */ }
+    setAuthenticated(false)
+  }
+
+  // ── Render gates ──────────────────────────────────────────────────────────
+
+  // 1. Still checking auth status — show spinner.
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <RefreshCw className="h-8 w-8 animate-spin mx-auto text-primary" />
+          <p className="mt-4 text-muted-foreground">Loading...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // 2. Profile exists but user is not authenticated → login page.
+  if (!setupMode && !authenticated) {
+    return (
+      <LoginPage
+        onLoggedIn={() => setAuthenticated(true)}
+        onSetupMode={() => setSetupMode(true)}
+      />
+    )
+  }
+
+  // 3. Still loading system status.
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -264,7 +326,7 @@ function App() {
     )
   }
 
-  // Initial setup: no rclone config yet → jump straight into Connections.
+  // 4. Initial setup: no rclone config yet → jump straight into Connections.
   if (!configExists) {
     return (
       <ConnectionsManager
@@ -272,6 +334,29 @@ function App() {
           checkConfig()
           refreshRemoteStatuses()
           fetchJobs()
+          // Re-check auth status — leaving Connections is where a fresh
+          // instance first reaches the "set an admin password" gate.
+          api.get('/auth/status').then(r => {
+            setSetupMode(r.data.setup_mode)
+            setAuthenticated(r.data.authenticated)
+          }).catch(() => {})
+        }}
+      />
+    )
+  }
+
+  // 5. Config exists but no auth profile → prompt to create one.
+  if (setupMode && configExists) {
+    return (
+      <SetupProfilePrompt
+        onCreated={() => {
+          setSetupMode(false)
+          setAuthenticated(true)
+        }}
+        onSkip={() => {
+          // User chose to skip — treat as authenticated in setup mode.
+          setSetupMode(false)
+          setAuthenticated(true)
         }}
       />
     )
@@ -338,6 +423,18 @@ function App() {
           >
             <SettingsIcon className="h-4 w-4" />
           </Button>
+
+          {authenticated && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleLogout}
+              className="h-8 px-2 flex items-center gap-1.5"
+              title="Logout"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </header>
 

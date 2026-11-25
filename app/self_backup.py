@@ -17,9 +17,13 @@ class SelfBackup:
         if not self.config_path.exists():
             return False, "Rclone config not found"
         
+        # auth_profile.json is deliberately NOT in this list. It holds the
+        # admin password hash and the jwt_secret used to sign session cookies
+        # — a copy in cloud storage would let anyone who can read that folder
+        # forge a session. The admin password stays on this service only.
         files_to_backup = [
             settings.jobs_file,
-            settings.rclone_config
+            settings.rclone_config,
         ]
         
         # Single destination - always overwrite
@@ -60,6 +64,9 @@ class SelfBackup:
                     "rclone", "copy",
                     source,
                     str(settings.config_dir),
+                    # Older versions uploaded the admin profile; never restore
+                    # one, or a stale password/jwt_secret would come back.
+                    "--exclude", "auth_profile.json",
                     "--config", str(self.config_path)
                 ],
                 capture_output=True,
