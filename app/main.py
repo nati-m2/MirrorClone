@@ -16,11 +16,26 @@ from app.config import settings
 
 # Event broadcaster for SSE
 class EventBroadcaster:
+    """Fan-out of job events to connected UIs.
+
+    Both limits here exist because a subscriber is cheap to open while the
+    producer is a backup: an unbounded per-client queue, filled by a job that
+    emits progress faster than a stalled reader drains it, is memory that
+    grows until the service dies mid-run.
+    """
+
+    MAX_CLIENTS = 32
+    QUEUE_SIZE = 256
+
     def __init__(self):
         self.clients: list[asyncio.Queue] = []
-    
+
     async def subscribe(self):
-        queue = asyncio.Queue()
+        if len(self.clients) >= self.MAX_CLIENTS:
+            yield 'data: {"event": "too_many_clients"}\n\n'
+            return
+
+        queue = asyncio.Queue(maxsize=self.QUEUE_SIZE)
         self.clients.append(queue)
         try:
             while True:
@@ -29,18 +44,25 @@ class EventBroadcaster:
         except asyncio.CancelledError:
             pass
         finally:
-            self.clients.remove(queue)
-    
+            if queue in self.clients:
+                self.clients.remove(queue)
+
     async def broadcast(self, event: str, data: dict = None):
         message = {"event": event, "data": data}
         for queue in self.clients:
-            await queue.put(message)
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                # A reader that far behind refetches on its next poll anyway.
+                # Dropping its update beats stalling the job.
+                pass
 
 broadcaster = EventBroadcaster()
 from app.models import (
     Job, JobCreate, JobUpdate, JobStatus, JobLog,
     RcloneConfig, SystemStatus,
     NotificationProvider, NotificationProviderCreate, NotificationProviderUpdate,
+    EncryptionKeyPublic, EncryptionKeyCreate, EncryptionKeyUpdate,
 )
 from app.auth_manager import AuthManager
 from app.job_engine import JobEngine
@@ -55,6 +77,8 @@ from app.app_settings_manager import (
     GoogleDriveCredentialsUpdate,
 )
 from app.auth_profile_manager import AuthProfileManager
+from app.encryption_keys_manager import EncryptionKeysManager
+from app.run_history import RunHistory
 
 
 job_manager = JobManager()
@@ -62,7 +86,9 @@ app_settings_manager = AppSettingsManager()
 auth_manager = AuthManager(app_settings=app_settings_manager)
 notifications_manager = NotificationsManager()
 guardian = Guardian(notifications_manager=notifications_manager)
-job_engine = JobEngine(on_log=job_manager.add_log)
+encryption_keys = EncryptionKeysManager()
+run_history = RunHistory()
+job_engine = JobEngine(on_log=job_manager.add_log, key_store=encryption_keys)
 self_backup = SelfBackup()
 auth_profile = AuthProfileManager()
 
@@ -90,6 +116,18 @@ async def execute_job_wrapper(job_id: str):
     
     success, output, exit_code = await job_engine.execute_job(job, on_progress)
     duration = int(time.time() - start_time)
+
+    metrics = job_engine.last_run_metrics.get(job_id, {})
+    run_history.append({
+        "job_id": job_id,
+        "job_name": job.name,
+        "status": "success" if success else "failed",
+        "duration": duration,
+        "exit_code": exit_code,
+        "destination": job.destination,
+        "error": None if success else (output or "")[:500],
+        **metrics,
+    })
     
     # Format duration message
     if duration < 60:
@@ -139,6 +177,13 @@ async def lifespan(app: FastAPI):
     interrupted = job_manager.reconcile_running_jobs()
     for job_id in interrupted:
         print(f"Marked interrupted job {job_id} as failed (service restarted mid-run)")
+
+    # Legacy jobs stored their passphrase inline, which put it in jobs.json —
+    # the file SelfBackup copies to the cloud beside the archives it opens.
+    # Move those into the key store once; jobs keep only a key id afterwards.
+    migrated = encryption_keys.migrate_job_passwords(job_manager)
+    if migrated:
+        print(f"Migrated inline zip passwords into the key store for: {', '.join(migrated)}")
     
     for job in job_manager.get_all_jobs():
         if job.enabled:
@@ -161,48 +206,63 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# The UI is served by this app, so same-origin requests need no CORS at all.
+# "*" together with allow_credentials makes Starlette echo back whatever
+# Origin asks, which hands every website a credentialed channel to this API.
+# Only an explicit list is enabled, and only when the operator sets one.
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 # ── Auth middleware ────────────────────────────────────────────────────────────
-# Routes that are always accessible (no JWT required).
-_PUBLIC_PREFIXES = (
-    "/api/auth/",        # login, status, setup, Google Drive OAuth callback
-    "/api/events",       # SSE stream (used by frontend before auth check)
-    "/assets/",          # static frontend assets
-)
-_PUBLIC_EXACT = {"/", "/login", "/api/status", "/api/settings/google-drive"}
-# Carved out of _PUBLIC_PREFIXES: these live under /api/auth/ but must never
-# be reachable without a session, or anyone could unlock the instance.
-_PROTECTED_EXACT = {"/api/auth/profile", "/api/auth/password"}
+# An allow-list, not a deny-list. The previous version opened everything under
+# /api/auth/ and carved exceptions back out, which left the Google Drive OAuth
+# writers reachable without a session: one unauthenticated POST to
+# /api/auth/google-drive/complete wrote an attacker-supplied token into
+# rclone.conf, pointing the next backup at their Drive. With an allow-list a
+# new endpoint is closed on the day it is added, which is the behaviour this
+# deny-list failed to provide.
+_PUBLIC_API = {
+    "/api/auth/status",      # is a profile configured, is this session valid
+    "/api/auth/login",
+    "/api/auth/setup",       # refuses once a profile exists
+    "/api/auth/logout",
+    "/api/status",           # rclone presence — the setup screen needs it
+    # Google redirects the browser here after consent, so it cannot require a
+    # session. It is safe because it proceeds only when `state` matches the
+    # 32-byte value written by an authenticated .../google-drive/start.
+    "/api/auth/google-drive/callback",
+}
+
+# Static frontend bundle only. Everything else under /api is closed.
+_PUBLIC_PREFIXES = ("/assets/",)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
 
-        # Always allow public routes and non-API frontend routes.
-        if path not in _PROTECTED_EXACT and (
-            path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-        ):
+        if path in _PUBLIC_API or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
             return await call_next(request)
 
-        # Non-API paths (SPA catch-all) are always allowed — the frontend
-        # itself enforces the login redirect.
+        # Non-API paths are the SPA shell; the frontend handles the redirect
+        # to the login screen itself.
         if not path.startswith("/api/"):
             return await call_next(request)
 
-        # Setup mode: no profile exists → everything open.
+        # Setup mode: no profile exists yet, so everything is open long enough
+        # for the first admin to be created. Set the password before putting
+        # the instance on a reachable address.
         if auth_profile.setup_mode:
             return await call_next(request)
 
-        # Profile exists → require valid JWT cookie.
         token = request.cookies.get(auth_profile.cookie_name())
         if not token:
             return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
@@ -225,14 +285,34 @@ _LOGIN_LOCKOUT_SECONDS = 60
 _login_state: dict = {"failures": 0, "locked_until": 0.0}
 
 
-def _set_session_cookie(response: JSONResponse, token: str) -> JSONResponse:
+def _is_https(request: Request) -> bool:
+    """Whether the browser reached us over HTTPS, reverse proxies included."""
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip().lower() == "https"
+    return request.url.scheme == "https"
+
+
+def _cookie_secure(request: Request) -> bool:
+    """Most deployments sit behind a TLS proxy, so the flag is decided per
+    request instead of being a constant somebody has to remember to flip.
+    COOKIE_SECURE=true/false overrides it."""
+    configured = settings.cookie_secure.strip().lower()
+    if configured in ("true", "1", "yes"):
+        return True
+    if configured in ("false", "0", "no"):
+        return False
+    return _is_https(request)
+
+
+def _set_session_cookie(response: JSONResponse, token: str, secure: bool = False) -> JSONResponse:
     response.set_cookie(
         key=auth_profile.cookie_name(),
         value=token,
         max_age=auth_profile.cookie_max_age(),
         httponly=True,
         samesite="lax",
-        secure=False,  # Set True when behind HTTPS reverse proxy
+        secure=secure,
     )
     return response
 
@@ -249,7 +329,7 @@ async def auth_status(request: Request):
 
 
 @app.post("/api/auth/setup")
-async def auth_setup(payload: dict):
+async def auth_setup(payload: dict, request: Request):
     """Set the admin password during first-time setup.
 
     Body: {"password": "..."}
@@ -268,11 +348,11 @@ async def auth_setup(payload: dict):
     auth_profile.create_profile(password)
     token = auth_profile.create_token()
 
-    return _set_session_cookie(JSONResponse(content={"message": "Password set"}), token)
+    return _set_session_cookie(JSONResponse(content={"message": "Password set"}), token, _cookie_secure(request))
 
 
 @app.post("/api/auth/login")
-async def auth_login(payload: dict):
+async def auth_login(payload: dict, request: Request):
     """Log in with the admin password. Body: {"password": "..."}"""
     if auth_profile.setup_mode:
         raise HTTPException(status_code=400, detail="No password configured — run setup first")
@@ -296,7 +376,7 @@ async def auth_login(payload: dict):
     _login_state["failures"] = 0
     _login_state["locked_until"] = 0.0
     token = auth_profile.create_token()
-    return _set_session_cookie(JSONResponse(content={"message": "Logged in"}), token)
+    return _set_session_cookie(JSONResponse(content={"message": "Logged in"}), token, _cookie_secure(request))
 
 
 @app.post("/api/auth/password")
@@ -484,6 +564,75 @@ async def get_usage_stats(refresh: bool = False):
     _USAGE_CACHE["value"] = response
     _USAGE_CACHE["ts"] = _time.time()
     return response
+
+
+@app.get("/api/stats/overview")
+async def get_stats_overview(days: int = 30):
+    """Everything the statistics page needs in one call: how the last `days`
+    went, a per-day success/failure split, and a per-job rollup.
+
+    Reads the local run history. It is a convenience cache — the archives and
+    their sidecars at the destination remain the authoritative record.
+    """
+    jobs = job_manager.get_all_jobs()
+    records = run_history.read(days=days)
+
+    by_job: dict[str, dict] = {}
+    for job in jobs:
+        by_job[job.id] = {
+            "job_id": job.id,
+            "job_name": job.name,
+            "status": job.status,
+            "runs": 0,
+            "failures": 0,
+            "last_bytes": None,
+            "last_file_count": None,
+            "local_bytes": 0,
+            "local_archives": 0,
+        }
+
+    for rec in records:
+        entry = by_job.get(rec.get("job_id"))
+        if not entry:
+            continue
+        entry["runs"] += 1
+        if rec.get("status") != "success":
+            entry["failures"] += 1
+        elif rec.get("archive_bytes"):
+            entry["last_bytes"] = rec["archive_bytes"]
+            entry["last_file_count"] = rec.get("file_count")
+
+    # Local archives still on disk, per job. Cheap: one directory listing.
+    backups_dir = Path("/backups")
+    if backups_dir.exists():
+        for job in jobs:
+            clean = "".join(c if c.isalnum() or c in '-_' else '_' for c in job.name)
+            entry = by_job[job.id]
+            for archive in backups_dir.glob(f"{clean}_*.zip"):
+                try:
+                    entry["local_bytes"] += archive.stat().st_size
+                    entry["local_archives"] += 1
+                except OSError:
+                    continue
+
+    return {
+        "summary": run_history.summary(days=days),
+        "daily": run_history.daily_outcomes(days=min(days, 90)),
+        "jobs": list(by_job.values()),
+    }
+
+
+@app.get("/api/stats/growth")
+async def get_stats_growth(days: int = 90):
+    """Archive size per run, per job, with sudden jumps flagged — the signal
+    that something downstream started writing a lot more data than usual."""
+    return {"jobs": run_history.growth(days=days)}
+
+
+@app.get("/api/stats/runs")
+async def get_stats_runs(days: int = 30, job_id: str = None, limit: int = 200):
+    """Raw run records, newest last."""
+    return run_history.read(days=days, job_id=job_id, limit=limit)
 
 
 @app.get("/api/status")
@@ -1122,6 +1271,90 @@ async def test_notification_provider(provider_id: str):
 # while a refresh button click within the window is instant.
 _RESTORE_LIST_CACHE: dict = {"value": None, "ts": 0.0}
 _RESTORE_LIST_TTL = 5.0  # seconds
+
+
+# ── Encryption keys ───────────────────────────────────────────────────────────
+# The secrets themselves live in /config/encryption_keys.json and are never
+# written into jobs.json, so a job definition can travel to a backup
+# destination without carrying the key that opens the archives there.
+
+
+def _key_usage() -> dict[str, list[str]]:
+    """Map key id -> names of the jobs currently encrypting with it."""
+    usage: dict[str, list[str]] = {}
+    for job in job_manager.get_all_jobs():
+        if job.encryption_key_id:
+            usage.setdefault(job.encryption_key_id, []).append(job.name)
+    return usage
+
+
+@app.get("/api/encryption-keys", response_model=list[EncryptionKeyPublic])
+async def list_encryption_keys():
+    """List keys without their secrets."""
+    usage = _key_usage()
+    return [encryption_keys.public(k, usage.get(k.id, [])) for k in encryption_keys.list()]
+
+
+@app.post("/api/encryption-keys", response_model=EncryptionKeyPublic)
+async def create_encryption_key(payload: EncryptionKeyCreate):
+    if not payload.secret.strip():
+        raise HTTPException(status_code=400, detail="Passphrase cannot be empty")
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+
+    existing = encryption_keys.find_by_secret(payload.secret)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"That passphrase is already stored as '{existing.name}'",
+        )
+
+    key = encryption_keys.create(payload)
+    return encryption_keys.public(key)
+
+
+@app.put("/api/encryption-keys/{key_id}", response_model=EncryptionKeyPublic)
+async def update_encryption_key(key_id: str, payload: EncryptionKeyUpdate):
+    """Rename a key, or point it at a new passphrase.
+
+    Changing the secret affects future runs only. Archives already written
+    stay encrypted with the old passphrase — nothing is re-encrypted, and the
+    fingerprint stored beside each archive is what identifies which key it
+    needs.
+    """
+    key = encryption_keys.update(key_id, payload)
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return encryption_keys.public(key, _key_usage().get(key_id, []))
+
+
+@app.post("/api/encryption-keys/{key_id}/reveal")
+async def reveal_encryption_key(key_id: str):
+    """Hand the passphrase back to a signed-in admin.
+
+    Losing a key means losing every archive it protects, so the key store is
+    readable rather than write-only. The admin session is the trust boundary
+    here, exactly as it is for the rclone credentials.
+    """
+    key = encryption_keys.get(key_id)
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"id": key.id, "name": key.name, "secret": key.secret}
+
+
+@app.delete("/api/encryption-keys/{key_id}")
+async def delete_encryption_key(key_id: str):
+    in_use = _key_usage().get(key_id, [])
+    if in_use:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Key is still used by: {', '.join(in_use)}",
+        )
+
+    if not encryption_keys.delete(key_id):
+        raise HTTPException(status_code=404, detail="Key not found")
+
+    return {"message": "Key deleted. Archives written with it stay encrypted and now need the passphrase from your own records."}
 
 
 @app.get("/api/restore/backups")

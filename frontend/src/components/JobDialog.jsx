@@ -4,7 +4,7 @@ import Button from './ui/Button'
 import Input from './ui/Input'
 import { Card, CardContent, CardHeader, CardTitle } from './ui/Card'
 import FileBrowser from './FileBrowser'
-import { getRemotesDetailed, listNotificationProviders } from '../lib/api'
+import { getRemotesDetailed, listNotificationProviders, listEncryptionKeys } from '../lib/api'
 
 // Default subfolder appended after the remote name. Kept for backwards compat
 // with snapshots already created under "<remote>:MirrorCloneBackups/...".
@@ -50,7 +50,7 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
     preserve_metadata: true,
     preserve_links: true,
     compress_before_upload: true,
-    zip_password: '',
+    encryption_key_id: '',
     retention_count: 0,
     local_retention_count: 0,
     exclude_patterns: [],
@@ -64,6 +64,16 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
   const [remotes, setRemotes] = useState([])
   const [remotesLoading, setRemotesLoading] = useState(true)
   const [notifProviders, setNotifProviders] = useState([])
+  const [encryptionKeys, setEncryptionKeys] = useState([])
+
+  // Keys are listed without their secrets — the job only ever stores an id.
+  useEffect(() => {
+    let active = true
+    listEncryptionKeys()
+      .then(res => { if (active) setEncryptionKeys(res.data || []) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [])
 
   // Load the available notification providers so the user can tick them on.
   useEffect(() => {
@@ -107,7 +117,7 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
         preserve_metadata: job.preserve_metadata !== undefined ? job.preserve_metadata : true,
         preserve_links: job.preserve_links !== undefined ? job.preserve_links : true,
         compress_before_upload: job.compress_before_upload !== undefined ? job.compress_before_upload : true,
-        zip_password: job.zip_password || '',
+        encryption_key_id: job.encryption_key_id || '',
         retention_count: job.retention_count !== undefined ? job.retention_count : 0,
         local_retention_count: job.local_retention_count !== undefined ? job.local_retention_count : 0,
         exclude_patterns: Array.isArray(job.exclude_patterns) ? job.exclude_patterns : [],
@@ -392,17 +402,24 @@ const JobDialog = ({ job, onSave, onClose, onManageConnections }) => {
               
               {formData.compress_before_upload && (
                 <div className="ml-6">
-                  <label className="text-sm font-medium mb-1 block">ZIP Password (optional)</label>
-                  <Input
-                    type="password"
-                    name="zip_password"
-                    value={formData.zip_password}
+                  <label className="text-sm font-medium mb-1 block">Encryption key (optional)</label>
+                  <select
+                    name="encryption_key_id"
+                    value={formData.encryption_key_id}
                     onChange={handleChange}
-                    placeholder="Leave empty for no encryption"
-                    className="w-full"
-                  />
+                    className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    <option value="">No encryption</option>
+                    {encryptionKeys.map(key => (
+                      <option key={key.id} value={key.id}>
+                        {key.name} ({key.fingerprint})
+                      </option>
+                    ))}
+                  </select>
                   <p className="text-xs text-muted-foreground mt-1">
-                    AES-256 encryption
+                    {encryptionKeys.length === 0
+                      ? 'No keys yet — add one under Settings → Encryption Keys.'
+                      : 'AES-256. The passphrase stays on this server; the job stores only the key id.'}
                   </p>
                 </div>
               )}

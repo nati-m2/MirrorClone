@@ -1,10 +1,12 @@
 {
   "Repository": "mirrorclone",
-  "Registry": "registry.natilab.com/mirrorclone",
-  "Tag": "1.4.7",
+  "Registry": "registry.natilab.com",
+  "Tag": "2.0.0",
   "Build": true,
   "Insecure": true,
   "HubUser": "natim2",
   "PushToHub": true,
-  "ExtraTags": ["latest"]
+  "ExtraTags": [
+    "latest"
+  ]
 }

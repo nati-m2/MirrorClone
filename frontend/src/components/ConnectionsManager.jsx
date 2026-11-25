@@ -2,12 +2,13 @@ import React, { useEffect, useState } from 'react'
 import {
   Plus, Trash2, RefreshCw, CheckCircle2, XCircle, Loader2, Link2,
   Cloud, HardDrive, Server, Database, AlertTriangle, Upload, Download,
-  ChevronDown, Bell,
+  Bell, KeyRound,
 } from 'lucide-react'
 import Button from './ui/Button'
 import AddConnectionDialog from './AddConnectionDialog'
 import ReconnectDialog from './ReconnectDialog'
 import NotificationsManager from './NotificationsManager'
+import EncryptionKeysManager from './EncryptionKeysManager'
 import {
   getRemotesDetailed, deleteRemote, testRemote, uploadConfig, downloadConfig
 } from '../lib/api'
@@ -66,9 +67,9 @@ const ConnectionCard = ({ remote, onDelete, onTest, onReconnect, testStatus }) =
   const offline = testStatus?.state === 'fail'
 
   return (
-    <div className="rounded-lg bg-card border border-border p-4 flex items-start gap-3">
+    <div className="flex items-start gap-3 py-3 px-2 -mx-2 rounded-md hover:bg-accent/20 transition-colors">
       {/* Icon */}
-      <div className="flex-shrink-0 mt-0.5 h-10 w-10 rounded bg-background/60 border border-border flex items-center justify-center">
+      <div className="flex-shrink-0 mt-0.5 h-9 w-9 rounded-md bg-muted/60 flex items-center justify-center">
         <ProviderIcon type={remote.type} className="h-5 w-5 text-primary" />
       </div>
 
@@ -127,38 +128,34 @@ const ConnectionCard = ({ remote, onDelete, onTest, onReconnect, testStatus }) =
   )
 }
 
-// Lightweight collapsible section used to group Connections / Notifications
-// on the Settings screen. Stateless — the caller controls `open`.
-const CollapsibleSection = ({ icon: Icon, title, subtitle, badge, open, onToggle, children }) => (
-  <div className="rounded-lg border border-border overflow-hidden">
-    <button
-      type="button"
-      onClick={onToggle}
-      className="w-full flex items-center gap-3 px-4 py-3 bg-card hover:bg-accent/40 transition-colors text-left"
-    >
-      {Icon && <Icon className="h-5 w-5 text-primary flex-shrink-0" />}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <h3 className="font-medium">{title}</h3>
-          {badge != null && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-              {badge}
-            </span>
-          )}
-        </div>
-        {subtitle && (
-          <div className="text-xs text-muted-foreground truncate">{subtitle}</div>
-        )}
-      </div>
-      <ChevronDown
-        className={`h-4 w-4 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`}
-      />
-    </button>
-    {open && (
-      <div className="px-4 py-4 border-t border-border bg-background/40">
-        {children}
-      </div>
-    )}
+// Settings navigation. A section is a destination, not a drawer: the rail
+// says where you are and the panel shows one section at a time, so nothing
+// has to be framed inside anything else.
+const SectionLink = ({ icon: Icon, title, count, active, onClick }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    className={`flex-1 md:flex-none md:w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left whitespace-nowrap border-b-2 md:border-b-0 md:border-l-2 transition-colors ${
+      active
+        ? 'border-primary text-foreground bg-accent/40'
+        : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-accent/20'
+    }`}
+  >
+    {Icon && <Icon className={`h-4 w-4 flex-shrink-0 ${active ? 'text-primary' : ''}`} />}
+    <span className="flex-1 truncate">{title}</span>
+    {count != null && <span className="text-xs text-muted-foreground">{count}</span>}
+  </button>
+)
+
+// The one rule the panel follows: a title, a line of orientation, and the
+// action that belongs to this section — then the content, undecorated.
+const SectionHeader = ({ title, description, children }) => (
+  <div className="flex items-start justify-between gap-4 pb-4 border-b border-border">
+    <div className="min-w-0">
+      <h2 className="text-base font-medium">{title}</h2>
+      <p className="text-xs text-muted-foreground mt-0.5 max-w-prose">{description}</p>
+    </div>
+    {children}
   </div>
 )
 
@@ -170,9 +167,9 @@ const ConnectionsManager = ({ onClose }) => {
   const [tests, setTests] = useState({}) // { name: { state, message } }
   const [busy, setBusy] = useState(false)
   const [reconnectTarget, setReconnectTarget] = useState(null) // remote object
-  // Which sections are expanded — Connections is open by default since
-  // that's what users come here for most often.
-  const [openSection, setOpenSection] = useState('connections') // 'connections' | 'notifications' | null
+  // Which section the rail is pointing at. Connections first: it is what
+  // people come here for, and nothing else works without one.
+  const [activeSection, setActiveSection] = useState('connections') // 'connections' | 'notifications' | 'keys'
 
   const runTest = async (name) => {
     setTests(prev => ({ ...prev, [name]: { state: 'testing', message: 'Testing…' } }))
@@ -275,9 +272,9 @@ const ConnectionsManager = ({ onClose }) => {
             <path d="M50 40 C50 44 46 47 42 47 L28 47 L28 51 L14 42 L28 33 L28 37 L42 37 C44 37 45 38 45 40 Z" fill="white" opacity="0.85"/>
           </svg>
           <div>
-            <h1 className="text-lg font-medium">MirrorClone</h1>
+            <h1 className="text-lg font-medium">Settings</h1>
             <p className="text-xs text-muted-foreground">
-              Manage cloud and storage connections used by your backup jobs.
+              Connections, alerts and encryption keys for this instance.
             </p>
           </div>
         </div>
@@ -293,44 +290,56 @@ const ConnectionsManager = ({ onClose }) => {
         </div>
       </header>
 
-      <div className="container mx-auto px-6 py-6 max-w-3xl space-y-3">
-        {/* ── Connections section ───────────────────────────────────────── */}
-        <CollapsibleSection
-          icon={Cloud}
-          title="Connections"
-          subtitle="Cloud and storage remotes used by your backup jobs"
-          badge={remotes.length}
-          open={openSection === 'connections'}
-          onToggle={() => setOpenSection(openSection === 'connections' ? null : 'connections')}
-        >
-          <div className="space-y-4">
-            {/* Add button row */}
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-medium text-muted-foreground">
-                {remotes.length} {remotes.length === 1 ? 'connection' : 'connections'}
-              </h2>
-              <Button onClick={() => setShowAdd(true)} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Connection
-              </Button>
-            </div>
+      <div className="container mx-auto px-6 py-6 max-w-5xl flex flex-col md:flex-row gap-5 md:gap-10">
+        <nav className="md:w-48 flex-shrink-0 flex md:flex-col gap-1 overflow-x-auto md:overflow-visible">
+          <SectionLink
+            icon={Cloud}
+            title="Connections"
+            count={remotes.length}
+            active={activeSection === 'connections'}
+            onClick={() => setActiveSection('connections')}
+          />
+          <SectionLink
+            icon={Bell}
+            title="Notifications"
+            active={activeSection === 'notifications'}
+            onClick={() => setActiveSection('notifications')}
+          />
+          <SectionLink
+            icon={KeyRound}
+            title="Encryption keys"
+            active={activeSection === 'keys'}
+            onClick={() => setActiveSection('keys')}
+          />
+        </nav>
 
-            {/* List */}
+        <div className="flex-1 min-w-0">
+        {activeSection === 'connections' && (
+          <div>
+            <SectionHeader
+              title="Connections"
+              description="Cloud and storage remotes your backup jobs write to."
+            >
+              <Button onClick={() => setShowAdd(true)} className="gap-2 flex-shrink-0">
+                <Plus className="h-4 w-4" />
+                Add connection
+              </Button>
+            </SectionHeader>
+
             {loading ? (
-              <div className="flex items-center justify-center py-10 gap-2 text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+              <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading…
               </div>
             ) : error ? (
-              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-2 text-destructive text-sm">
+              <div className="flex items-start gap-2 py-6 text-sm text-destructive">
                 <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
                 <div>{error}</div>
               </div>
             ) : remotes.length === 0 ? (
-              <div className="text-center py-10 rounded-lg border border-dashed border-border">
-                <Cloud className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-                <h3 className="font-semibold mb-1">No connections yet</h3>
+              <div className="py-14 text-center">
+                <Cloud className="h-10 w-10 mx-auto text-muted-foreground/50 mb-3" />
                 <p className="text-sm text-muted-foreground mb-4">
-                  Add your first cloud or storage connection to start creating backup jobs.
+                  No connections yet. Add one to start creating backup jobs.
                 </p>
                 <Button onClick={() => setShowAdd(true)} className="gap-2 mx-auto">
                   <Plus className="h-4 w-4" />
@@ -338,7 +347,7 @@ const ConnectionsManager = ({ onClose }) => {
                 </Button>
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="divide-y divide-border">
                 {remotes.map(r => (
                   <ConnectionCard
                     key={r.name}
@@ -353,8 +362,8 @@ const ConnectionsManager = ({ onClose }) => {
             )}
 
             {/* Power-user controls: raw rclone.conf import/export */}
-            <div className="pt-4 border-t border-border space-y-2">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Advanced</h4>
+            <div className="mt-10 pt-5 border-t border-border space-y-2">
+              <h3 className="text-sm font-medium">Advanced</h3>
               <div className="flex flex-wrap gap-2">
                 <label className="cursor-pointer">
                   <input type="file" accept=".conf" onChange={handleUpload} className="hidden" />
@@ -368,24 +377,34 @@ const ConnectionsManager = ({ onClose }) => {
                   Download rclone.conf
                 </Button>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground max-w-prose">
                 Replace the entire config by uploading a file generated with <code className="font-mono">rclone config</code>,
                 or download a backup of the current configuration.
               </p>
             </div>
           </div>
-        </CollapsibleSection>
+        )}
 
-        {/* ── Notifications section ─────────────────────────────────────── */}
-        <CollapsibleSection
-          icon={Bell}
-          title="Notifications"
-          subtitle="Apprise endpoints (Telegram, Slack, Email, ...) used by your jobs"
-          open={openSection === 'notifications'}
-          onToggle={() => setOpenSection(openSection === 'notifications' ? null : 'notifications')}
-        >
-          <NotificationsManager embedded />
-        </CollapsibleSection>
+        {activeSection === 'notifications' && (
+          <div>
+            <SectionHeader
+              title="Notifications"
+              description="Where MirrorClone tells you a backup finished or failed — Telegram, Slack, email and anything else Apprise speaks."
+            />
+            <NotificationsManager embedded />
+          </div>
+        )}
+
+        {activeSection === 'keys' && (
+          <div>
+            <SectionHeader
+              title="Encryption keys"
+              description="Passphrases for AES-256 archives. They stay on this server and never travel with a backup."
+            />
+            <EncryptionKeysManager embedded />
+          </div>
+        )}
+        </div>
       </div>
 
       {showAdd && (

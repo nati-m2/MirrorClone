@@ -17,6 +17,11 @@ class SelfBackup:
         if not self.config_path.exists():
             return False, "Rclone config not found"
         
+        # encryption_keys.json is deliberately NOT in this list either. It
+        # holds the passphrases that open the archives stored in this very
+        # folder; uploading it would put the lock and its key in the same
+        # place. Jobs reference keys by id, so jobs.json stays secret-free.
+        #
         # auth_profile.json is deliberately NOT in this list. It holds the
         # admin password hash and the jwt_secret used to sign session cookies
         # — a copy in cloud storage would let anyone who can read that folder

@@ -21,7 +21,8 @@ class Job(BaseModel):
     preserve_metadata: bool = Field(default=True, description="Preserve file metadata and permissions")
     preserve_links: bool = Field(default=True, description="Preserve symbolic links")
     compress_before_upload: bool = Field(default=True, description="Create ZIP archive before upload (default: True)")
-    zip_password: Optional[str] = Field(default=None, description="Password for ZIP encryption")
+    zip_password: Optional[str] = Field(default=None, description="DEPRECATED: migrated into an EncryptionKey on startup")
+    encryption_key_id: Optional[str] = Field(default=None, description="Id of the encryption key used to protect the archive (None = no encryption)")
     retention_count: int = Field(default=0, description="Keep only X latest remote backups (0 = keep all)")
     local_retention_count: int = Field(default=0, description="Keep only X latest local ZIP backups in /backups (0 = keep all)")
     exclude_patterns: list[str] = Field(default_factory=list, description="Glob patterns to exclude from backup (e.g. '.env', 'media/**', '*.log')")
@@ -47,7 +48,7 @@ class JobCreate(BaseModel):
     preserve_metadata: bool = True
     preserve_links: bool = True
     compress_before_upload: bool = True
-    zip_password: Optional[str] = None
+    encryption_key_id: Optional[str] = None
     retention_count: int = 0
     local_retention_count: int = 0
     exclude_patterns: list[str] = []
@@ -65,7 +66,7 @@ class JobUpdate(BaseModel):
     preserve_metadata: Optional[bool] = None
     preserve_links: Optional[bool] = None
     compress_before_upload: Optional[bool] = None
-    zip_password: Optional[str] = None
+    encryption_key_id: Optional[str] = None
     retention_count: Optional[int] = None
     local_retention_count: Optional[int] = None
     exclude_patterns: Optional[list[str]] = None
@@ -92,6 +93,40 @@ class NotificationProviderUpdate(BaseModel):
     name: Optional[str] = None
     url: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class EncryptionKey(BaseModel):
+    """A named passphrase used to encrypt backup archives (AES-256 ZIP).
+
+    Lives only in /config/encryption_keys.json on this server. Jobs reference
+    it by id, so jobs.json carries no secret and stays safe to copy to a
+    backup destination — the key never travels with the data it opens.
+    """
+    id: str = Field(..., description="Unique key identifier")
+    name: str = Field(..., description="Human-readable label, e.g. 'apps archive key'")
+    secret: str = Field(..., description="The passphrase itself — never leaves this server")
+    algo: str = Field(default="zip-aes256", description="Cipher the archives are written with")
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+class EncryptionKeyPublic(BaseModel):
+    """What the API hands out: everything except the secret."""
+    id: str
+    name: str
+    algo: str
+    created_at: datetime
+    fingerprint: str = Field(..., description="First 8 hex chars of sha256(secret) — identifies a key without revealing it")
+    in_use_by: list[str] = Field(default_factory=list, description="Names of jobs currently encrypting with this key")
+
+
+class EncryptionKeyCreate(BaseModel):
+    name: str
+    secret: str
+
+
+class EncryptionKeyUpdate(BaseModel):
+    name: Optional[str] = None
+    secret: Optional[str] = None
 
 
 class JobLog(BaseModel):

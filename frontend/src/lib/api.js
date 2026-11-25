@@ -46,6 +46,19 @@ export const runJobNow = (jobId) => api.post(`/jobs/${jobId}/run`)
 export const stopJob = (jobId) => api.post(`/jobs/${jobId}/stop`)
 export const resetJobStatus = (jobId) => api.post(`/jobs/${jobId}/reset`)
 
+// Statistics. Read-only views over the run history kept on the server.
+export const getStatsOverview = (days = 30) => api.get('/stats/overview', { params: { days } })
+export const getStatsGrowth = (days = 90) => api.get('/stats/growth', { params: { days } })
+export const getStatsRuns = (params = {}) => api.get('/stats/runs', { params })
+
+// Encryption keys. The list never returns the secrets; `reveal` fetches one
+// on demand for a signed-in admin.
+export const listEncryptionKeys = () => api.get('/encryption-keys')
+export const createEncryptionKey = (payload) => api.post('/encryption-keys', payload)
+export const updateEncryptionKey = (id, payload) => api.put(`/encryption-keys/${id}`, payload)
+export const revealEncryptionKey = (id) => api.post(`/encryption-keys/${id}/reveal`)
+export const deleteEncryptionKey = (id) => api.delete(`/encryption-keys/${id}`)
+
 export const getLogs = (jobId, limit = 100) => 
   api.get('/logs', { params: { job_id: jobId, limit } })
 

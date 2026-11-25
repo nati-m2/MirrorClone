@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
-import { Plus, RefreshCw, Database, RotateCcw, HardDrive, Settings as SettingsIcon, LogOut } from 'lucide-react'
+import { Plus, RefreshCw, Database, RotateCcw, HardDrive, BarChart3, Settings as SettingsIcon, LogOut } from 'lucide-react'
 import JobCard from './components/JobCard'
 import BackupStatistics from './components/BackupStatistics'
+import StatisticsPage from './components/StatisticsPage'
 import JobDialog from './components/JobDialog'
 import ConnectionsManager from './components/ConnectionsManager'
 import RestoreWizard from './components/RestoreWizard'
@@ -35,7 +36,7 @@ function App() {
   const [authChecked, setAuthChecked] = useState(false)
   const [setupMode, setSetupMode] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
-  const [activeTab, setActiveTab] = useState('backup') // 'backup' | 'restore'
+  const [activeTab, setActiveTab] = useState('stats') // 'stats' | 'backup' | 'restore'
   const [showRestoreWizard, setShowRestoreWizard] = useState(false)
   // When a snapshot card is clicked we open the wizard pre-populated with it.
   const [restoreSnapshot, setRestoreSnapshot] = useState(null)
@@ -166,7 +167,9 @@ function App() {
   }, [fetchJobs])
 
   useEffect(() => {
-    if (!configExists) return
+    // /api/events needs a session now, so don't open it on the login screen:
+    // EventSource retries a 401 forever and would hammer the server.
+    if (!configExists || (!setupMode && !authenticated)) return
 
     // Initial paint already loaded jobs in the mount effect; SSE keeps them fresh.
     const eventSource = new EventSource('/api/events')
@@ -204,7 +207,7 @@ function App() {
       if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
       eventSource.close()
     }
-  }, [configExists, scheduleFetchJobs])
+  }, [configExists, setupMode, authenticated, scheduleFetchJobs])
 
   const checkConfig = async () => {
     try {
@@ -389,6 +392,7 @@ function App() {
   // Floating-action handler depends on the active tab.
   const fabAction = activeTab === 'backup' ? handleCreateJob : () => openRestoreFor(null)
   const fabLabel  = activeTab === 'backup' ? 'New Backup Job' : 'Open Restore Wizard'
+  const showFab   = activeTab !== 'stats'
 
   return (
     <div className="min-h-screen bg-background">
@@ -443,6 +447,16 @@ function App() {
         <div className="container mx-auto px-6">
           <div className="flex gap-0">
             <button
+              onClick={() => setActiveTab('stats')}
+              className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors
+                ${activeTab === 'stats'
+                  ? 'border-primary text-primary'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'}`}
+            >
+              <BarChart3 className="h-4 w-4" />
+              Statistics
+            </button>
+            <button
               onClick={() => setActiveTab('backup')}
               className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors
                 ${activeTab === 'backup'
@@ -479,6 +493,9 @@ function App() {
         )}
 
         <main className="flex-1 min-w-0">
+          {/* ── Statistics tab (landing page) ── */}
+          {activeTab === 'stats' && <StatisticsPage />}
+
           {/* ── Backup tab ── */}
           {activeTab === 'backup' && (
             jobs.length === 0 ? (
@@ -530,15 +547,18 @@ function App() {
         </main>
       </div>
 
-      {/* Floating Action Button — mirrors the blue "+" in the HA add-on. */}
-      <button
-        onClick={fabAction}
-        title={fabLabel}
-        aria-label={fabLabel}
-        className="fixed bottom-6 right-6 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:brightness-110 active:scale-95 transition flex items-center justify-center z-40"
-      >
-        <Plus className="h-6 w-6" />
-      </button>
+      {/* Floating Action Button — mirrors the blue "+" in the HA add-on.
+          Hidden on Statistics, which is a read-only view. */}
+      {showFab && (
+        <button
+          onClick={fabAction}
+          title={fabLabel}
+          aria-label={fabLabel}
+          className="fixed bottom-6 right-6 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg hover:brightness-110 active:scale-95 transition flex items-center justify-center z-40"
+        >
+          <Plus className="h-6 w-6" />
+        </button>
+      )}
 
       {showJobDialog && (
         <JobDialog

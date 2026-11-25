@@ -573,25 +573,24 @@ const NotificationsManager = ({ embedded = false, onClose }) => {
         </h2>
         <Button onClick={() => { setEditing(null); setShowDialog(true) }} className="gap-2">
           <Plus className="h-4 w-4" />
-          Add Notification
+          Add notification
         </Button>
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-10 gap-2 text-muted-foreground">
-          <Loader2 className="h-5 w-5 animate-spin" /> Loading…
+        <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Loading…
         </div>
       ) : error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 flex items-start gap-2 text-destructive text-sm">
+        <div className="flex items-start gap-2 py-6 text-sm text-destructive">
           <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
           <div>{error}</div>
         </div>
       ) : providers.length === 0 ? (
-        <div className="text-center py-10 rounded-lg border border-dashed border-border">
-          <Bell className="h-12 w-12 mx-auto text-muted-foreground mb-3" />
-          <h3 className="font-semibold mb-1">No notifications yet</h3>
+        <div className="py-14 text-center">
+          <Bell className="h-10 w-10 mx-auto text-muted-foreground/50 mb-3" />
           <p className="text-sm text-muted-foreground mb-4">
-            Add a notification endpoint (Telegram, Slack, Email, ...) to get alerts on backup events.
+            Nothing is sending alerts yet. Add an endpoint to hear about failed backups.
           </p>
           <Button onClick={() => { setEditing(null); setShowDialog(true) }} className="gap-2 mx-auto">
             <Plus className="h-4 w-4" />
@@ -599,12 +598,12 @@ const NotificationsManager = ({ embedded = false, onClose }) => {
           </Button>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="divide-y divide-border">
           {providers.map(p => {
             const t = testing[p.id]
             return (
-              <div key={p.id} className="rounded-lg bg-card border border-border p-4 flex items-start gap-3">
-                <div className="flex-shrink-0 mt-0.5 h-10 w-10 rounded bg-background/60 border border-border flex items-center justify-center">
+              <div key={p.id} className="flex items-start gap-3 py-3 px-2 -mx-2 rounded-md hover:bg-accent/20 transition-colors">
+                <div className="flex-shrink-0 mt-0.5 h-9 w-9 rounded-md bg-muted/60 flex items-center justify-center">
                   <Bell className="h-5 w-5 text-primary" />
                 </div>
                 <div className="flex-1 min-w-0">

@@ -7,20 +7,112 @@ import fnmatch
 import os
 import stat
 import zipfile
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Callable
 from app.models import Job, JobStatus, JobLog
 from app.config import settings
+from app.encryption_keys_manager import fingerprint as key_fingerprint
 
 
 class JobEngine:
     """Executes backup jobs using Rclone"""
     
-    def __init__(self, on_log: Optional[Callable] = None):
+    def __init__(self, on_log: Optional[Callable] = None, key_store=None):
         self.config_path = settings.rclone_config
         self.on_log = on_log
+        # Resolves a job's encryption_key_id to the passphrase and to the key's
+        # label. Injected so the engine never reads a secret off the job.
+        self.key_store = key_store
         self.running_jobs: dict[str, subprocess.Popen] = {}
+        # Facts about the most recent run of each job, picked up by the caller
+        # for the run history. Transient by design.
+        self.last_run_metrics: dict[str, dict] = {}
+
+    def _resolve_password(self, job: Job) -> Optional[str]:
+        """Passphrase for this job's archive, or None when it is unencrypted.
+
+        `zip_password` is the pre-key-store field; startup migration empties
+        it, and this fallback only covers a job written by an older version
+        before that ran.
+        """
+        if job.encryption_key_id and self.key_store:
+            return self.key_store.get_secret(job.encryption_key_id)
+        return getattr(job, "zip_password", None)
+
+    def _encryption_meta(self, job: Job) -> dict:
+        """How this archive is protected, for the sidecar. Never the secret —
+        the fingerprint is enough to tell which key an archive needs."""
+        if not job.encryption_key_id or not self.key_store:
+            return {"algo": "none"}
+
+        key = self.key_store.get(job.encryption_key_id)
+        if not key:
+            return {"algo": "unknown", "key_id": job.encryption_key_id}
+
+        return {
+            "algo": key.algo,
+            "key_id": key.id,
+            "key_name": key.name,
+            "fingerprint": key_fingerprint(key.secret),
+        }
+
+    @staticmethod
+    def _archive_contents(zip_path: str) -> tuple[Optional[int], Optional[int]]:
+        """(file count, uncompressed bytes) read back from the archive itself.
+
+        Works for AES-256 archives too: ZIP encrypts contents, not the central
+        directory, so the listing stays readable without the passphrase.
+        """
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                entries = [i for i in zf.infolist() if not i.is_dir()]
+                return len(entries), sum(i.file_size for i in entries)
+        except Exception as e:
+            print(f"Could not read archive contents for stats: {e}")
+            return None, None
+
+    def _write_sidecar(self, job: Job, zip_path: str) -> tuple[Optional[str], dict]:
+        """Describe the archive in a small JSON file stored beside it.
+
+        The point is that the archive explains itself: years from now, on a
+        machine that never ran MirrorClone, this says where the data came
+        from, what is inside, and which key opens it. It is also what lets the
+        statistics be rebuilt from the destination after the local history is
+        gone.
+        """
+        path = Path(zip_path)
+        file_count, source_bytes = self._archive_contents(zip_path)
+
+        try:
+            archive_bytes = path.stat().st_size
+        except OSError:
+            archive_bytes = None
+
+        meta = {
+            "tool": f"MirrorClone {settings.app_version}",
+            "created": datetime.now().isoformat(),
+            "job_name": job.name,
+            "job_id": job.id,
+            "sources": [p.strip() for p in job.source_path.split(',') if p.strip()],
+            "excludes": job.exclude_patterns or [],
+            "archive": path.name,
+            "archive_bytes": archive_bytes,
+            "source_bytes": source_bytes,
+            "file_count": file_count,
+            "destination": job.destination,
+            "encryption": self._encryption_meta(job),
+            "restore": f"rclone copy <remote>:<folder>/{path.name} . && unzip {path.name}",
+        }
+
+        sidecar = path.with_suffix(path.suffix + ".meta.json")
+        try:
+            sidecar.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+            return str(sidecar), meta
+        except OSError as e:
+            print(f"Could not write sidecar: {e}")
+            return None, meta
 
     @staticmethod
     def _matches_exclude(rel_posix: str, name: str, patterns: list[str]) -> bool:
@@ -72,10 +164,20 @@ class JobEngine:
 
         self._log(job.id, "started", f"Starting backup: {job.name}")
         self.running_jobs[job.id] = None
+        self.last_run_metrics.pop(job.id, None)
 
         try:
             # Handle multiple source paths (comma-separated)
             source_paths = [p.strip() for p in job.source_path.split(',') if p.strip()]
+
+            # A job that asks for encryption but whose key was deleted must
+            # fail loudly. Writing a readable archive where the user expects
+            # an encrypted one is the worse outcome.
+            password = self._resolve_password(job)
+            if job.encryption_key_id and not password:
+                msg = "Encryption key not found — refusing to write an unencrypted archive"
+                self._log(job.id, "failed", msg, -1)
+                return False, msg, -1
 
             # Create ZIP if needed
             if job.compress_before_upload:
@@ -87,17 +189,27 @@ class JobEngine:
                 zip_path = await loop.run_in_executor(
                     None,
                     lambda: self._create_zip_multi(
-                        source_paths, job.name, job.zip_password, job.exclude_patterns or [], job.preserve_links
+                        source_paths, job.name, password, job.exclude_patterns or [], job.preserve_links
                     )
                 )
                 if zip_path:
                     self._log(job.id, "progress", f"ZIP created: {zip_path}")
+
+                    sidecar_path, meta = self._write_sidecar(job, zip_path)
+                    self.last_run_metrics[job.id] = {
+                        "archive": meta.get("archive"),
+                        "archive_bytes": meta.get("archive_bytes"),
+                        "source_bytes": meta.get("source_bytes"),
+                        "file_count": meta.get("file_count"),
+                        "key_fingerprint": meta.get("encryption", {}).get("fingerprint"),
+                    }
+
                     # Cleanup old local ZIPs if local retention is configured
                     if job.local_retention_count > 0:
                         await self._cleanup_old_local_zips_async(job)
                     if on_progress:
                         await on_progress("uploading", "Uploading files...", 0)
-                    return await self._upload_file(job, zip_path, on_progress)
+                    return await self._upload_file(job, zip_path, on_progress, sidecar_path)
                 else:
                     self._log(job.id, "failed", "Failed to create ZIP archive", -1)
                     return False, "Failed to create ZIP archive", -1
@@ -127,7 +239,8 @@ class JobEngine:
             flags.extend(["--drive-chunk-size", "64M"])
         return flags
 
-    async def _upload_file(self, job: Job, file_path: str, on_progress=None) -> tuple[bool, str, int]:
+    async def _upload_file(self, job: Job, file_path: str, on_progress=None,
+                           sidecar_path: Optional[str] = None) -> tuple[bool, str, int]:
         """Upload a single file to destination with date and time in folder name.
         Streams rclone progress via _run_rclone_with_progress to avoid pipe-buffer
         deadlocks when --progress produces large volumes of output.
@@ -160,6 +273,17 @@ class JobEngine:
         )
 
         if result_code == 0:
+            # The sidecar travels with the archive, so the destination keeps
+            # explaining itself even if this server is gone. Failing to upload
+            # it is logged, never fatal to the backup.
+            if sidecar_path:
+                side = subprocess.run(
+                    ["rclone", "copy", sidecar_path, dest, "--config", str(self.config_path)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if side.returncode != 0:
+                    self._log(job.id, "progress", f"Sidecar upload failed: {side.stderr.strip()[:200]}")
+
             # Cleanup old backups if retention is set
             if job.retention_count > 0:
                 await self._cleanup_old_backups_async(job, clean_name)
@@ -404,6 +528,14 @@ class JobEngine:
                     deleted += 1
                 except Exception as e:
                     print(f"Failed to delete {f}: {e}")
+                # The sidecar describes that archive and nothing else, so it
+                # goes with it. Left behind, it would pile up forever: the
+                # pattern above only ever matches .zip files.
+                sidecar = f.with_suffix(f.suffix + ".meta.json")
+                try:
+                    sidecar.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"Failed to delete {sidecar}: {e}")
 
             if deleted > 0:
                 self._log(job.id, "progress", f"Deleted {deleted} old local ZIP backup(s)")
